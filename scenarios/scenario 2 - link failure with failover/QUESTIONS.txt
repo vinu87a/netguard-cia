@@ -1,0 +1,40 @@
+SCENARIO 2 — Link failure with failover (the classic Batfish example network)
+Source: pybatfish networks/example (same 13-config AS1/AS2/AS3 lab that ships
+in this repo under Misc/reference/sample_configs) + "Getting started with Batfish"
+/ "Validating Configuration Settings" notebooks
+
+THE NETWORK
+Three ASes with iBGP + route reflectors and eBGP interconnects (see
+network-diagram.png). An AS2 "department" service lives at 2.128.0.0/16
+(hosts like 2.128.0.1). Known seeded defects: dead eBGP peers on as1border1,
+duplicate loopback 2.1.1.2/32 on two devices, MTU mismatches.
+
+HOW TO RUN
+1. Upload every .cfg in configs/, click "Build snapshot".
+2. Ask the questions below.
+
+QUESTIONS TO ASK
+1) "What breaks if I shut the AS1-AS2 direct link (as1border1
+    GigabitEthernet1/0)? I care about AS1 reaching 2.128.0.0/16."
+   (expected: GO — traffic reroutes and SELECTS the AS3 transit path,
+    as1core1 -> as1border2 -> as3border2 -> ... -> as2dept1)
+
+2) "Now ALSO shut the AS1-AS3 link (as1border2 GigabitEthernet0/0). Can AS1
+    still reach 2.128.0.1?"
+   (expected: NO-GO — with both exits down AS1 is isolated from the AS2
+    department prefix; validates stacking on the previous turn)
+
+3) "Are there any problems with the current configs?"
+   (expected findings: 3 non-established/incompatible BGP peers on
+    as1border1, duplicate interface IP 2.1.1.2/32, parse/init issues —
+    the health_checks bundle finds the seeded defects)
+
+4) "What if I lower local-preference from 350 to 150 on the AS2-inbound
+    route-map at as1border1?"
+   (the "silent hairpin": the egress should flip to the longer AS3 path even
+    though the direct link stays up — watch for the route-map edit being
+    staged and the before/after diff)
+
+EXPECTED VERDICT NOTES
+Q1 hinges on the AS3 path being SELECTED (not merely existing) — the
+traceroute path summary in FINDINGS should show the as1border2/AS3 hops.

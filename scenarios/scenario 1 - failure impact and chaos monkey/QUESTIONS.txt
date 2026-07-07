@@ -1,0 +1,41 @@
+SCENARIO 1 — Failure impact and Chaos Monkey
+Source: pybatfish notebook "Analyzing the Impact of Failures (and letting
+loose a Chaos Monkey)" + networks/failure-analysis
+
+THE NETWORK
+13 city routers across the US, Europe and Asia: newyork, washingtondc,
+philadelphia, seattle, sanfrancisco, losangeles, houston, london, paris,
+milan, tokyo, hongkong, singapore — see network-diagram.png. A
+point-of-presence (PoP) prefix 2.128.0.0/24 hangs off the network; the
+notebook's theme is checking which failures cut cities off from the PoP.
+
+HOW TO RUN
+1. In the app sidebar, upload every .cfg in this folder's configs/ directory.
+2. Click "Build snapshot", wait for the parse-clean confirmation.
+3. Ask the questions below in the chat, one at a time.
+
+QUESTIONS TO ASK
+1) "What breaks if the london router fails entirely? I care about whether
+    paris can still reach the PoP prefix 2.128.0.0/24."
+   (notebook expectation: paris still reaches the PoP — traffic reroutes;
+    verdict should be GO-flavored, with the surviving path shown)
+
+2) "Now ALSO fail the newyork router. Does paris still reach 2.128.0.0/24?"
+   (stacked failure — the app applies the whole failure set as one engine
+    fork; watch the ledger's failure_set grow)
+
+3) "Reset assumption: with only the seattle router failed, which flows in the
+    whole network change behavior compared to the original snapshot?"
+   (say "clear the previous failures first" so the translator resets the set;
+    this exercises differential reachability — the engine's list of every
+    flow whose disposition changed)
+
+4) "Play chaos monkey: fail the two links between newyork and washingtondc
+    and tell me if any city loses the PoP."
+   (interface-level failure stacking)
+
+WHY THIS SET IS INTERESTING
+This is the exact network the Batfish team uses to demo fork-based failure
+simulation — the same mechanism our apply_failure_set tool uses. Failures are
+cheap engine forks, so stacking "now also fail X" turns is fast (no config
+re-editing, no re-parse).

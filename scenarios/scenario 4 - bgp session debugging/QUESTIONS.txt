@@ -1,0 +1,37 @@
+SCENARIO 4 — BGP session debugging
+Source: pybatfish notebook "Introduction to BGP Analysis" +
+networks/example-bgp
+
+THE NETWORK
+The AS1/AS2/AS3 example network, but with several BGP misconfigurations
+seeded on purpose (see network-diagram.png). The notebook walks through
+debugging sessions that show up as NOT_COMPATIBLE, NOT_ESTABLISHED,
+UNKNOWN_REMOTE, LOCAL_IP_UNKNOWN_STATICALLY and NO_LOCAL_IP.
+
+HOW TO RUN
+1. Upload every .cfg in configs/, click "Build snapshot".
+2. Ask the questions below.
+
+QUESTIONS TO ASK
+1) "Show me the BGP session status for the whole network. Which sessions are
+    not established, and on which devices?"
+   (expect a mix of ESTABLISHED and broken sessions — the summary counts and
+    the per-neighbor list come from the engine's bgpSessionStatus)
+
+2) "Why is the BGP session for the peer on as1border2 not compatible? Debug
+    it."
+   (notebook storyline: an UNKNOWN_REMOTE — the configured neighbor has no
+    matching peer in the network)
+
+3) "Debug the not-established session on as2border2 — what is wrong with its
+    local IP?"
+   (notebook storyline: LOCAL_IP_UNKNOWN_STATICALLY — missing
+    update-source/local address)
+
+4) "Overall health check: any parse issues, undefined references, duplicate
+    IPs, or forwarding loops in this snapshot?"
+
+WHY THIS SET IS INTERESTING
+Session-status facts used to be invisible to this app (the MCP layer hides
+bgpSessionStatus); they are now first-class engine facts, and this network
+is purpose-built to exercise every broken-session flavor.

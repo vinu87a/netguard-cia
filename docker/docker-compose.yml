@@ -1,0 +1,57 @@
+# NetGuard-CIA — two-container stack: Batfish engine + Batfish MCP server
+# Bring up:  docker compose up -d
+# Verify:    see README_docker.md
+# Values confirmed against upstream Presidio-Federal/batfish-mcp-container
+# docker-compose.yml + batfish/server.py (Step 0, 2026-07-06).
+
+services:
+  batfish:
+    image: batfish/allinone:latest        # pin a digest/tag in production
+    container_name: netguard-batfish
+    ports:
+      - "9997:9997"                        # Batfish service (worker)
+      - "9996:9996"                        # Batfish service (coordinator)
+    volumes:
+      - batfish-data:/data
+    networks:
+      - netguard
+    restart: unless-stopped
+    healthcheck:
+      # image has no curl — probe the coordinator port over bash /dev/tcp
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/9996' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  batfish-mcp:
+    # pinned by digest (was :latest) — resolved 2026-07-06
+    image: ghcr.io/presidio-federal/batfish-mcp-container@sha256:7748fa20870288cc586bddfe782bcc5ccd3b2a33e09bf8b162315908375c95db
+    container_name: netguard-batfish-mcp
+    environment:
+      - BATFISH_HOST=batfish              # talk to the engine by service name
+      - BATFISH_PORT=9996
+      - TRANSPORT=streamable-http         # upstream default; also accepts stdio
+      - PORT=3009
+      - HOST=0.0.0.0
+      - DISABLE_JWT_AUTH=true             # no Azure AD locally
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "3009:3009"                       # MCP streamable-http endpoint: /mcp/
+    volumes:
+      # patch: upstream failure_impact builds an invalid fork-snapshot name
+      # (enum repr + '/' from interface names). Fixed copy in docker/patches/.
+      - ./patches/batfish_failure_impact_tool.py:/app/batfish/tools/batfish_failure_impact_tool.py:ro
+    depends_on:
+      batfish:
+        condition: service_healthy
+    networks:
+      - netguard
+    restart: unless-stopped
+
+networks:
+  netguard:
+    driver: bridge
+
+volumes:
+  batfish-data:

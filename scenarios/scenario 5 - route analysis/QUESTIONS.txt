@@ -1,0 +1,31 @@
+SCENARIO 5 — Route analysis
+Source: pybatfish notebook "Introduction to Route Analysis" +
+networks/route-analysis
+
+THE NETWORK
+A minimal two-router setup: border1 and border2, BGP-peered, each with its
+own connected networks. Small on purpose — every routing-table entry is easy
+to eyeball, so it is a good first demo.
+
+HOW TO RUN
+1. Upload border1.cfg and border2.cfg from configs/, click "Build snapshot".
+2. Ask the questions below.
+
+QUESTIONS TO ASK
+1) "Show me the routes each router has selected for 1.0.2.0/24. Which
+    protocol won and what is the next hop?"
+   (mirrors the notebook's per-prefix RIB inspection — the routes_to tool
+    returns the selected main-RIB entries)
+
+2) "Which routes did border1 learn via BGP, and which are connected/local?"
+
+3) "If border2's interface toward border1 goes down, does border1 still have
+    any route to border2's networks?"
+   (small failure what-if on a two-node network — easy to sanity-check)
+
+4) "Any BGP session problems or config health issues in this snapshot?"
+
+WHY THIS SET IS INTERESTING
+With only two devices you can verify every engine fact by reading the two
+configs yourself — good for building trust in the FINDINGS zone before
+moving to the bigger scenarios.

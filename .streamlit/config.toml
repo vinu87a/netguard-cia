@@ -1,0 +1,10 @@
+[theme]
+# steel-blue brand theme drawn from logo.png
+primaryColor = "#2E6C9E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F4F9"
+textColor = "#12212F"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

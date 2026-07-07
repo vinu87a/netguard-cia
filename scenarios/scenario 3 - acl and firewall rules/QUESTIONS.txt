@@ -1,0 +1,39 @@
+SCENARIO 3 — ACL and firewall rules
+Source: pybatfish notebook "Analyzing ACLs and Firewall Rules" +
+networks/example-filters/current
+
+THE NETWORK
+Just two devices, all about filters:
+- rtr-with-acl : a router with an inbound ACL named "acl_in" that is supposed
+  to let clients reach the DNS server 218.8.104.58.
+- firewall    : a zone firewall between interfaces (GigabitEthernet0/0/2 in,
+  GigabitEthernet0/0/3 out) that is supposed to allow ONLY NFS (TCP port
+  2049) between the two zones.
+
+HOW TO RUN
+1. Upload both .cfg files from configs/, click "Build snapshot".
+2. Ask the questions below.
+
+QUESTIONS TO ASK
+1) "Can host 10.10.10.1 reach the DNS server 218.8.104.58 (DNS/UDP 53)
+    through the acl_in filter on rtr-with-acl?"
+   (notebook expectation: permitted)
+
+2) "Is there ANY host in subnet 10.10.10.0/24 that is DENIED DNS access to
+    218.8.104.58 by acl_in? The intent is that the whole subnet is allowed."
+   (notebook expectation: yes — a small slice of the subnet is denied by an
+    earlier, broader deny line: an intent violation worth flagging)
+
+3) "Can HTTP go from 10.114.64.1 to 10.114.60.10 across the firewall from
+    GigabitEthernet0/0/2 to GigabitEthernet0/0/3? Only NFS is supposed to
+    cross zones."
+   (notebook expectation: denied — good)
+
+4) "Are any lines in the ACLs on rtr-with-acl unreachable or shadowed by
+    earlier lines?"
+   (notebook expectation: filterLineReachability finds unreachable lines —
+    the app's ACL analysis should surface shadowed/dead lines)
+
+WHY THIS SET IS INTERESTING
+Filter questions have crisp right answers, so it is a good demo of the
+FINDINGS zone carrying exact engine facts (permit/deny + matched line).
