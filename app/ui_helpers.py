@@ -231,3 +231,170 @@ def before_after_dots(base_edges: list[dict], current_edges: list[dict],
     after = topology_dot(current_edges, removed_edges=removed,
                          failed_nodes=failed_nodes, title="AFTER (current)")
     return before, after
+
+
+# ---------------------------------------------------------------------------
+# Icon-based topology figures (networkx layout + matplotlib + device PNGs)
+# ---------------------------------------------------------------------------
+from functools import lru_cache
+from pathlib import Path
+
+ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+KNOWN_KINDS = ("router", "switch", "firewall", "loadbalancer", "server",
+               "wireless", "internet", "isp", "vpn", "device")
+
+# hostname-hint patterns, checked in order (first match wins)
+_NAME_HINTS: list[tuple[str, tuple[str, ...]]] = [
+    ("firewall",     ("firewall", "-fw", "fw-", "asa", "srx", "palo", "forti",
+                       "checkpoint")),
+    ("loadbalancer", ("-lb", "lb-", "loadbal", "balancer", "f5-", "netscaler",
+                       "haproxy")),
+    ("vpn",          ("vpn", "ipsec", "tunnel-gw")),
+    ("wireless",     ("-ap", "ap-", "wlc", "wifi", "wireless", "wlan")),
+    ("server",       ("host", "server", "-srv", "srv-", "www", "-db", "db-",
+                       "app-")),
+    ("internet",     ("internet",)),
+    ("isp",          ("isp",)),
+    ("switch",       ("switch", "-sw", "sw-", "tor-", "-tor", "access-")),
+    ("router",       ("rtr", "router", "border", "core", "spine", "leaf",
+                       "edge", "-gw", "gw-", "pe-", "-pe", "ce-", "-ce",
+                       "dist", "agg")),
+]
+
+
+def _kind_from_name(name: str) -> str | None:
+    n = name.lower()
+    for kind, hints in _NAME_HINTS:
+        if any(h in n for h in hints):
+            return kind
+    return None
+
+
+@lru_cache(maxsize=16)
+def _icon(kind: str, variant: str):
+    """Load an icon PNG; unknown kinds or missing files fall back to the
+    neutral 'device' icon so a new device type can never crash the diagram."""
+    import matplotlib.pyplot as plt
+    try:
+        return plt.imread(str(ASSETS / f"{kind}_{variant}.png"))
+    except FileNotFoundError:
+        return plt.imread(str(ASSETS / f"device_{variant}.png"))
+
+
+def classify_devices(configs: dict[str, str]) -> dict[str, str]:
+    """{hostname(lowercase): kind} sniffed from raw config text —
+    deterministic, no engine call. Config markers outrank name hints; keys
+    are lowercased because the analysis engine lowercases node names."""
+    types: dict[str, str] = {}
+    for text in configs.values():
+        # Cisco `hostname X` or Juniper `host-name X;`
+        m = (re.search(r"^\s*hostname\s+(\S+)", text, re.M)
+             or re.search(r"host-name\s+(\S+?);", text))
+        if not m:
+            continue
+        name = m.group(1).lower()
+
+        # 1) config-content markers (strongest evidence)
+        kind = None
+        if ("ASA Version" in text                                  # Cisco ASA
+                or re.search(r"^\s*access-list \S+ extended ", text, re.M)
+                or re.search(r"^\s*(security \{|set security zones)", text, re.M)  # Juniper SRX
+                or re.search(r"^\s*zone-pair security", text, re.M)):  # IOS ZBF
+            kind = "firewall"
+        elif re.search(r"^\s*crypto (map|ikev2|isakmp)", text, re.M):
+            kind = "vpn"
+        elif (re.search(r"^\s*switchport", text, re.M)
+                or re.search(r"^\s*spanning-tree mode", text, re.M)):
+            kind = "switch"
+
+        # 2) hostname conventions, 3) default: parsed configs are routers
+        types[name] = kind or _kind_from_name(name) or "router"
+    return types
+
+
+def device_icon_kind(node: str, device_types: dict[str, str] | None = None) -> str:
+    """Icon for a node: the classified map first, then hostname hints. A node
+    we know nothing about gets the neutral 'device' icon — it should look
+    unknown, not masquerade as a router."""
+    n = node.lower()
+    kind = (device_types or {}).get(n)
+    if kind in KNOWN_KINDS:
+        return kind
+    # engine-generated nodes (ISP modeling) and anything not uploaded
+    return _kind_from_name(n) or "device"
+
+
+def topology_figure(edges: list[dict], removed_edges: set[frozenset] | None = None,
+                    failed_nodes: list[str] | None = None,
+                    device_types: dict[str, str] | None = None,
+                    title: str = ""):
+    """Topology as a matplotlib Figure with device icons. Lost links render
+    dashed red; failed devices get the red icon variant + FAILED label."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import networkx as nx
+    from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+
+    pairs = _node_pairs(edges)
+    removed = removed_edges or set()
+    failed = set(failed_nodes or [])
+    G = nx.Graph()
+    for p in pairs | removed:
+        a, b = sorted(p)
+        G.add_edge(a, b)
+    for n in failed:
+        G.add_node(n)
+    if not G.nodes:
+        G.add_node("(no devices)")
+
+    n = len(G.nodes)
+    pos = nx.spring_layout(G, seed=7, k=1.6 / max(n, 2) ** 0.5, iterations=200)
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), dpi=150)
+    ax.set_axis_off()
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold", color="#1F4E79",
+                     pad=10)
+
+    for p in pairs:
+        a, b = tuple(p)
+        ax.plot(*zip(pos[a], pos[b]), color="#8CA3BA", lw=1.4, zorder=1)
+    for p in removed:
+        a, b = tuple(p)
+        ax.plot(*zip(pos[a], pos[b]), color="#C0392B", lw=1.8, ls=(0, (5, 4)),
+                zorder=1)
+
+    zoom = 0.11 if n <= 8 else (0.085 if n <= 14 else 0.065)
+    for node, (x, y) in pos.items():
+        kind = device_icon_kind(node, device_types)
+        variant = "red" if node in failed else "steel"
+        ab = AnnotationBbox(OffsetImage(_icon(kind, variant), zoom=zoom),
+                            (x, y), frameon=False, zorder=3)
+        ax.add_artist(ab)
+        label = node + ("  ✕ FAILED" if node in failed else "")
+        ax.annotate(label, (x, y), xytext=(0, -16 if n <= 14 else -13),
+                    textcoords="offset points", ha="center", fontsize=6.5,
+                    color="#C0392B" if node in failed else "#12212F",
+                    fontweight="bold" if node in failed else "normal", zorder=4)
+
+    ax.margins(0.12)
+    fig.tight_layout()
+    return fig
+
+
+def before_after_figures(base_edges: list[dict], current_edges: list[dict],
+                         failed_nodes: list[str] | None = None,
+                         device_types: dict[str, str] | None = None):
+    """(before_fig, after_fig) with device icons; the after figure shows lost
+    links dashed red and failed devices red."""
+    removed = _node_pairs(base_edges) - _node_pairs(current_edges)
+    before = topology_figure(base_edges, device_types=device_types,
+                             title="BEFORE — original network")
+    after = topology_figure(current_edges, removed_edges=removed,
+                            failed_nodes=failed_nodes,
+                            device_types=device_types,
+                            title="AFTER — with the change applied")
+    return before, after

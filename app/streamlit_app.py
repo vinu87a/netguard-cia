@@ -19,8 +19,9 @@ import streamlit as st
 from engine_direct import DirectEngine
 from mcp_client import BatfishMCPClient, BatfishOps
 from orchestrator import Ledger, cleanup_session, run_scenario_turn, run_upload_turn
-from ui_helpers import (before_after_dots, facts_rows, parse_verdict,
-                        topology_dot, verdict_status, verdict_summary_rows)
+from ui_helpers import (before_after_figures, classify_devices, facts_rows,
+                        parse_verdict, topology_figure, verdict_status,
+                        verdict_summary_rows)
 
 LOGO = Path(__file__).resolve().parent.parent / "logo.png"
 
@@ -192,17 +193,18 @@ def render_answer(result) -> str:
     if ledger.current != ledger.base and st.session_state.base_edges is not None:
         try:
             cur_edges = get_engine().layer3_edges(ledger.network, ledger.current)
-            before, after = before_after_dots(
+            before, after = before_after_figures(
                 st.session_state.base_edges, cur_edges,
-                failed_nodes=ledger.node_failures)
+                failed_nodes=ledger.node_failures,
+                device_types=st.session_state.get("device_types"))
             st.markdown("#### Topology — before vs after")
             c1, c2 = st.columns(2)
             with c1:
-                st.graphviz_chart(before, width="stretch")
+                st.pyplot(before, width="stretch")
             with c2:
-                st.graphviz_chart(after, width="stretch")
+                st.pyplot(after, width="stretch")
             st.caption("Dashed red = links lost vs the original network; "
-                       "red nodes = failed devices.")
+                       "red devices = failed.")
         except Exception as e:
             st.caption(f"(topology diagram unavailable: {e})")
 
@@ -242,6 +244,8 @@ with st.sidebar:
         st.session_state.snapshot_ready = ok
         (st.success if ok else st.error)(msg)
         if ok:
+            st.session_state.device_types = classify_devices(
+                st.session_state.ledger.configs)
             try:
                 st.session_state.base_edges = get_engine().layer3_edges(
                     st.session_state.ledger.network, "base")
@@ -265,9 +269,12 @@ if not st.session_state.snapshot_ready:
 elif st.session_state.base_edges:
     with st.expander("Network topology",
                      expanded=not st.session_state.messages):
-        # natural (capped) size, not stretched to full page width
-        st.graphviz_chart(topology_dot(st.session_state.base_edges,
-                                       title="YOUR NETWORK"))
+        left, _ = st.columns([3, 1])   # keep the diagram a readable size
+        with left:
+            st.pyplot(topology_figure(st.session_state.base_edges,
+                                      device_types=st.session_state.get("device_types"),
+                                      title="YOUR NETWORK"),
+                      width="stretch")
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
