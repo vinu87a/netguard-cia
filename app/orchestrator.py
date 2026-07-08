@@ -15,9 +15,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from openai import OpenAI
-
 from engine_direct import DirectEngine
+from llm_provider import build_provider
 from mcp_client import BatfishOps, MCPToolError
 from ui_helpers import FRIENDLY_CHECK
 
@@ -38,21 +37,11 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# LLM backend: Ollama Cloud via its OpenAI-compatible endpoint.
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com/v1")
-OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")
-# Both confirmed tool-capable / accessible on this key (2026-07-06).
-TRANSLATOR_MODEL = os.environ.get("NETGUARD_TRANSLATOR_MODEL", "qwen3-coder:480b")
-SYNTHESIZER_MODEL = os.environ.get("NETGUARD_SYNTHESIZER_MODEL", "gpt-oss:120b")
+# LLM backend selection lives in llm_provider.py (NETGUARD_LLM_PROVIDER env:
+# e.g. "commotion,ollama" = Commotion primary with Ollama fallback).
 
 MAX_RESULT_CHARS = 20_000  # cap a single tool result fed back to the LLM
 MAX_TRANSLATOR_ITERATIONS = 12
-
-
-def _llm() -> OpenAI:
-    if not OLLAMA_API_KEY:
-        raise RuntimeError("OLLAMA_API_KEY is not set (env or .env in repo root)")
-    return OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
 
 
 def _openai_tools() -> list[dict]:
@@ -686,6 +675,19 @@ def _synthesizer_system() -> str:
     )
 
 
+_CHANGE_TOOLS = {"apply_failure_set", "stage_change_snapshot"}
+_PROBE_TOOLS = {"network_traceroute", "batfish_simulate_traffic",
+                "network_bidirectional_reachability"}
+
+
+def _needs_probe_nudge(tool_log: list[dict]) -> bool:
+    """A change/failure was applied but no reachability probe confirmed any
+    specific flow — the investigation is incomplete regardless of what the
+    model thinks."""
+    ran = {e["tool"] for e in tool_log}
+    return bool(ran & _CHANGE_TOOLS) and not (ran & _PROBE_TOOLS)
+
+
 @dataclass
 class ScenarioResult:
     findings: str
@@ -698,8 +700,9 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
                       chat_history: list[dict] | None = None,
                       progress=None) -> ScenarioResult:
     """Full scenario turn. `progress` is an optional callable(str) for UI status."""
-    client = _llm()
     notify = progress or (lambda _msg: None)
+    # fresh provider per turn -> fallback stickiness resets each turn
+    provider = build_provider(on_switch=notify)
 
     # ---- translator loop -------------------------------------------------
     messages = (
@@ -710,38 +713,44 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     tool_log: list[dict] = []
     final_text = ""
 
+    nudged = False
     for _ in range(MAX_TRANSLATOR_ITERATIONS):
-        response = client.chat.completions.create(
-            model=TRANSLATOR_MODEL,
-            max_tokens=16000,
-            tools=_openai_tools(),
-            messages=messages,
-        )
-        msg = response.choices[0].message
-        tool_calls = msg.tool_calls or []
-        if not tool_calls:
-            final_text = msg.content or ""
+        reply = provider.chat(messages, tools=_openai_tools())
+        if not reply.tool_calls:
+            # Deterministic completeness guard: don't accept "done" on a
+            # change scenario with zero reachability probes in the log.
+            if tool_log and _needs_probe_nudge(tool_log) and not nudged:
+                nudged = True
+                notify("Investigation incomplete — asking for probes")
+                messages.append({"role": "assistant", "content": reply.content})
+                messages.append({"role": "user", "content": (
+                    "COMPLETENESS CHECK FAILED: you applied a change/failure "
+                    "but ran no reachability probe to confirm the specific "
+                    "service flow the user asked about. Continue now: run "
+                    "network_traceroute for the user's flow from an interior "
+                    "device (and differential_reachability + detect_loops if "
+                    "not already run). Then finish.")})
+                continue
+            final_text = reply.content
             break  # translator finished (READY FOR SYNTHESIS) or asked a question
 
         messages.append({
             "role": "assistant",
-            "content": msg.content or "",
-            "tool_calls": [tc.model_dump() for tc in tool_calls],
+            "content": reply.content,
+            "tool_calls": [{"id": tc.id, "type": "function",
+                             "function": {"name": tc.name,
+                                          "arguments": json.dumps(tc.arguments)}}
+                            for tc in reply.tool_calls],
         })
-        for tc in tool_calls:
-            name = tc.function.name
+        for tc in reply.tool_calls:
+            name = tc.name
             notify(f"Running: {FRIENDLY_CHECK.get(name, name.replace('_', ' '))}")
             try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError as e:
-                args, out, is_error = {}, f"ERROR: unparsable tool arguments: {e}", True
-            else:
-                try:
-                    out = _execute_translator_tool(ops, ledger, name, args)
-                    is_error = out.startswith("ERROR")
-                except MCPToolError as e:
-                    out, is_error = f"ERROR: {e}", True
-            tool_log.append({"tool": name, "input": args,
+                out = _execute_translator_tool(ops, ledger, name, tc.arguments)
+                is_error = out.startswith("ERROR")
+            except MCPToolError as e:
+                out, is_error = f"ERROR: {e}", True
+            tool_log.append({"tool": name, "input": tc.arguments,
                              "result": out, "is_error": is_error})
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": out})
@@ -766,15 +775,11 @@ TRANSLATOR NOTE: {final_text or '(none)'}
 STRUCTURED TOOL RESULTS (the ONLY source of engine facts):
 {engine_facts}
 """
-    synth = client.chat.completions.create(
-        model=SYNTHESIZER_MODEL,
-        max_tokens=16000,
-        messages=[
-            {"role": "system", "content": _synthesizer_system()},
-            {"role": "user", "content": synth_user},
-        ],
-    )
-    answer = synth.choices[0].message.content or ""
+    synth = provider.chat([
+        {"role": "system", "content": _synthesizer_system()},
+        {"role": "user", "content": synth_user},
+    ])
+    answer = synth.content
 
     # Split the two zones on the VERDICT line (docs/05)
     idx = answer.find("VERDICT:")

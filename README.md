@@ -119,12 +119,22 @@ a topology diagram:
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `OLLAMA_API_KEY` (.env) | — | LLM credentials (required) |
+| `NETGUARD_LLM_PROVIDER` | auto | `commotion,ollama` (primary,fallback), a single name, or unset (auto) |
+| `OLLAMA_API_KEY` (.env) | — | Ollama Cloud credentials |
 | `OLLAMA_BASE_URL` | `https://ollama.com/v1` | any OpenAI-compatible endpoint works |
-| `NETGUARD_TRANSLATOR_MODEL` | `qwen3-coder:480b` | the tool-calling model |
-| `NETGUARD_SYNTHESIZER_MODEL` | `gpt-oss:120b` | the verdict-writing model |
+| `NETGUARD_TRANSLATOR_MODEL` | `qwen3-coder:480b` | the tool-calling model (Ollama) |
+| `NETGUARD_SYNTHESIZER_MODEL` | `gpt-oss:120b` | the verdict-writing model (Ollama) |
+| `COMMOTION_URL` / `COMMOTION_API_KEY` / `COMMOTION_WORKER_ID` | — | Commotion (Tata Communications AI worker) credentials |
 | `BATFISH_MCP_URL` | `http://localhost:3009/mcp/` | analysis server endpoint |
 | `BATFISH_DIRECT_HOST` | `localhost` | direct engine host |
+
+**LLM provider** — the app abstracts the LLM behind `app/llm_provider.py`, so
+you can run Ollama Cloud alone, Commotion alone, or Commotion-primary with
+Ollama-fallback (`NETGUARD_LLM_PROVIDER=commotion,ollama`). Commotion has no
+native function-calling API, so the adapter emulates tool use via a strict
+JSON protocol; if it fails mid-question the turn continues on the fallback with
+the full transcript replayed. For Commotion, paste the persona in
+`Misc/docs/08_commotion_worker_persona.md` into the worker's system prompt.
 
 ## Project structure
 
@@ -132,9 +142,10 @@ a topology diagram:
 app/                    the Streamlit app (runtime)
   streamlit_app.py        chat UI: upload, verdict tables, topology
   orchestrator.py         translator loop, session ledger, synthesizer
+  llm_provider.py         provider layer (Ollama / Commotion + fallback)
   mcp_client.py           analysis-server client
   engine_direct.py        direct engine questions (forks, sessions, diffs)
-  ui_helpers.py           verdict parsing / checks table / topology DOT
+  ui_helpers.py           verdict parsing / checks table / topology icons
 prompts/                LLM system prompts (loaded at runtime)
 docker/                 the analysis stack (compose, pinned images, patches)
 scenarios/              five ready-made demos (configs + questions)
