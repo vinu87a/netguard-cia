@@ -128,7 +128,11 @@ class CommotionProvider:
     def _render(msg: dict, tools: list[dict] | None) -> str:
         role = msg["role"]
         if role == "system":
-            out = f"## CONTEXT\n{msg['content']}"
+            # Pass the content through with its own SESSION STATE / DEVICE
+            # INVENTORY headings intact — do NOT wrap it in a renamed block. The
+            # translator sub-agent matches those literal headings and returns a
+            # false INSUFFICIENT-DATA refusal if a wrapper hides them.
+            out = msg["content"]
             if tools:
                 schemas = "\n".join(
                     json.dumps({"name": t["function"]["name"],

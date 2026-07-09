@@ -1129,11 +1129,15 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
 
 def _translator_context(ledger: Ledger) -> str:
     """DATA the translator needs — session state + device inventory (no
-    behavioral instructions; those live in the worker prompt)."""
+    behavioral instructions; those live in the worker prompt).
+
+    The block headings MUST be exactly SESSION STATE / DEVICE INVENTORY: the
+    Commotion translator sub-agent matches on those literal names and returns a
+    false INSUFFICIENT-DATA refusal if it can't find them verbatim."""
     return (
-        "## Current session state (ledger)\n"
+        "## SESSION STATE\n"
         f"{json.dumps(ledger.to_public_dict(), indent=1)}\n\n"
-        "## Device inventory (nodes / interfaces / vendors)\n"
+        "## DEVICE INVENTORY (nodes / interfaces / vendors)\n"
         f"{ledger.device_summary}"
     )
 
@@ -1183,15 +1187,50 @@ class ScenarioResult:
     clarification: str | None = None   # set when the translator asked a question
 
 
+_FALSE_REFUSAL_RE = re.compile(
+    r"insufficient.?data|i (?:do ?n['’]?t|don['’]?t) have|"
+    r"missing|not (?:been )?provided|please provide", re.I)
+_BLOCK_NAME_RE = re.compile(
+    r"session state|device inventory|available checks|tool schema", re.I)
+
+
+def _is_false_context_refusal(text: str) -> bool:
+    """True when the translator claims the SESSION STATE / DEVICE INVENTORY /
+    AVAILABLE CHECKS blocks are missing — they are ALWAYS included in the
+    message, so this is a false refusal (observed intermittently on the
+    Commotion worker) rather than a genuine clarification."""
+    return bool(text and _FALSE_REFUSAL_RE.search(text)
+                and _BLOCK_NAME_RE.search(text))
+
+
+_TRANSLATOR_REASSERT = (
+    "All required blocks ARE present in this conversation: the SESSION STATE, "
+    "DEVICE INVENTORY, and AVAILABLE CHECKS (the tool JSON schemas) were "
+    "provided above. You have everything needed — do NOT reply INSUFFICIENT-DATA "
+    "about missing context. Select the single best check and reply with EXACTLY "
+    "one JSON tool call: {\"tool\": ..., \"args\": { ... }}.")
+
+
 def _translator_rounds(provider, ops: BatfishOps, ledger: Ledger,
                        messages: list[dict], tool_log: list[dict],
                        notify) -> str:
     """Run the translator tool-loop until it stops requesting checks. Mutates
     `messages` and `tool_log` in place; returns the final plain-text reply."""
+    reasserts = 0
     for _ in range(MAX_TRANSLATOR_ITERATIONS):
         reply = provider.chat(messages, tools=_openai_tools(),
                               role="TRANSLATOR", format_hint=_TRANSLATOR_FORMAT)
         if not reply.tool_calls:
+            # Intermittent false "missing context" refusal: the blocks are in
+            # the message. Re-assert their presence and retry a bounded number
+            # of times before accepting the reply as a genuine clarification.
+            if (reasserts < 1 and not tool_log
+                    and _is_false_context_refusal(reply.content)):
+                reasserts += 1
+                notify("Translator claimed missing context — re-asserting once")
+                messages.append({"role": "user",
+                                 "content": _TRANSLATOR_REASSERT})
+                continue
             return reply.content
         messages.append({
             "role": "assistant", "content": reply.content,
