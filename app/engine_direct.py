@@ -173,6 +173,51 @@ class DirectEngine:
         return {"prefix": prefix, "row_count": int(len(df)),
                 "trace": _records(df)}
 
+    # -- OSPF (the other IGP; 38 lab configs use it) ----------------------------
+    def ospf_compatibility(self, network: str, snapshot: str,
+                           nodes: str | None = None,
+                           remote_nodes: str | None = None) -> dict:
+        """OSPF adjacency compatibility — incompatible/unestablished neighbor
+        pairs and why (area/network-type/MTU/timer mismatches)."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        if remote_nodes:
+            kw["remoteNodes"] = remote_nodes
+        df = bf.q.ospfSessionCompatibility(**kw).answer().frame()
+        status_col = next((c for c in df.columns if "Status" in c), None)
+        summary: dict[str, int] = {}
+        problems = df
+        if status_col:
+            summary = {str(k): int(v)
+                       for k, v in df[status_col].value_counts().items()}
+            problems = df[df[status_col].astype(str) != "ESTABLISHED"]
+        return {"summary": summary, "problem_count": int(len(problems)),
+                "problems": _records(problems)}
+
+    def ospf_edges(self, network: str, snapshot: str, nodes: str | None = None,
+                   remote_nodes: str | None = None) -> dict:
+        """Established OSPF adjacencies."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        if remote_nodes:
+            kw["remoteNodes"] = remote_nodes
+        df = bf.q.ospfEdges(**kw).answer().frame()
+        return {"edge_count": int(len(df)), "edges": _records(df)}
+
+    def ospf_process_config(self, network: str, snapshot: str,
+                            nodes: str | None = None) -> dict:
+        """OSPF process configuration (router-id, areas, reference bandwidth …)."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        df = bf.q.ospfProcessConfiguration(**kw).answer().frame()
+        return {"process_count": int(len(df)), "processes": _records(df)}
+
     # -- native diff: what did the change break --------------------------------
     def differential_reachability(self, network: str, snapshot: str,
                                   reference_snapshot: str) -> dict:

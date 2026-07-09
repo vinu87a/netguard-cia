@@ -684,6 +684,48 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "ospf_compatibility",
+        "description": (
+            "OSPF adjacency compatibility — incompatible or unestablished OSPF "
+            "neighbor pairs and why (area / network-type / MTU / timer mismatch). "
+            "Use when a change touches OSPF interfaces/areas. Optional nodes / "
+            "remote_nodes scope."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "remote_nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "ospf_edges",
+        "description": "Established OSPF adjacencies. Optional nodes / "
+                       "remote_nodes scope.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "remote_nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "ospf_process_config",
+        "description": "OSPF process configuration (router-id, areas, reference "
+                       "bandwidth). Optional nodes scope.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -927,6 +969,17 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
         return _truncate(_ENGINE.prefix_tracer(
             net, snap, args["prefix"],
             nodes=_normalize_node_spec(args.get("nodes"))))
+    if name == "ospf_compatibility":
+        return _truncate(_ENGINE.ospf_compatibility(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            remote_nodes=_normalize_node_spec(args.get("remote_nodes"))))
+    if name == "ospf_edges":
+        return _truncate(_ENGINE.ospf_edges(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            remote_nodes=_normalize_node_spec(args.get("remote_nodes"))))
+    if name == "ospf_process_config":
+        return _truncate(_ENGINE.ospf_process_config(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes"))))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))
     if name == "health_checks":

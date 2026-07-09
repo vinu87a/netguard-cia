@@ -150,6 +150,9 @@ FRIENDLY_CHECK = {
     "bgp_rib": "BGP route table",
     "bgp_edges": "BGP adjacencies",
     "prefix_tracer": "Prefix propagation trace",
+    "ospf_compatibility": "OSPF compatibility check",
+    "ospf_edges": "OSPF adjacencies",
+    "ospf_process_config": "OSPF process check",
 }
 def _loads(result: str):
     try:
@@ -256,6 +259,16 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
         elif tool == "prefix_tracer" and isinstance(r, dict):
             target = f"propagation of {r.get('prefix')}"
             outcome = f"{r.get('row_count', '?')} propagation records"
+        elif tool == "ospf_compatibility" and isinstance(r, dict):
+            target = "OSPF neighbor pairs"
+            outcome = (", ".join(f"{k} {v}" for k, v in (r.get("summary") or {}).items())
+                       or f"{r.get('problem_count', '?')} problems")
+        elif tool == "ospf_edges" and isinstance(r, dict):
+            target = "OSPF adjacencies"
+            outcome = f"{r.get('edge_count', '?')} adjacencies"
+        elif tool == "ospf_process_config" and isinstance(r, dict):
+            target = "OSPF processes"
+            outcome = f"{r.get('process_count', '?')} processes"
         elif tool == "routes_to" and isinstance(r, dict):
             target = f"RIB routes to {args.get('prefix')}"
             outcome = f"{r.get('route_count')} routes"
