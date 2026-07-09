@@ -886,6 +886,57 @@ def _normalize_node_spec(spec):
     return s  # bare name or comma-separated set — valid as-is
 
 
+_REACH_HEADER_KEYS = {"srcIps", "dstIps", "srcPorts", "dstPorts",
+                      "ipProtocols", "applications"}
+
+
+def _coerce_reachability_args(args: dict) -> dict:
+    """Tolerate the loose shapes models emit for reachability_search. The engine
+    wants `actions` as a dispositionSpec STRING ('success'|'failure'|a specific
+    disposition) with packet fields in `headers`; models routinely pass actions
+    as a list/object with the header fields stuffed inside. Pull the disposition
+    out to a string and lift any header/location fields to the right place."""
+    out = dict(args)
+    headers = dict(out.get("headers") or {})
+    actions: list[str] = []
+
+    def absorb(d: dict) -> None:
+        for ak in ("action", "disposition", "actions"):
+            v = d.get(ak)
+            if isinstance(v, str):
+                actions.append(v)
+            elif isinstance(v, list):
+                actions.extend(x for x in v if isinstance(x, str))
+        for k, v in d.items():
+            if k in _REACH_HEADER_KEYS:
+                headers.setdefault(k, v)
+            elif k in ("start_location", "startLocation", "source"):
+                out.setdefault("start_location", v)
+            elif k in ("end_location", "endLocation", "destination"):
+                out.setdefault("end_location", v)
+
+    a = out.get("actions")
+    if isinstance(a, str):
+        actions.append(a)
+    elif isinstance(a, dict):
+        absorb(a)
+    elif isinstance(a, list):
+        for it in a:
+            if isinstance(it, str):
+                actions.append(it)
+            elif isinstance(it, dict):
+                absorb(it)
+    # lift header fields the model put at the top level into headers
+    for k in list(_REACH_HEADER_KEYS):
+        if k in out:
+            headers.setdefault(k, out.pop(k))
+
+    out["actions"] = actions[0] if actions else "success"
+    if headers:
+        out["headers"] = headers
+    return out
+
+
 def _coerce_failure_args(args: dict) -> dict:
     """Tolerate the loose failure-set arg shapes these models emit and coerce to
     {node_failures, interface_failures}. Handles the schema shape plus common
@@ -1054,6 +1105,7 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
     if name == "multipath_consistency":
         return _truncate(_ENGINE.multipath_consistency(net, snap))
     if name == "reachability_search":
+        args = _coerce_reachability_args(args)
         return _truncate(_ENGINE.reachability_search(
             net, snap, actions=args.get("actions", "success"),
             headers=args.get("headers"),
