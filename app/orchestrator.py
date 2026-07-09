@@ -865,6 +865,13 @@ def _normalize_node_spec(spec):
     as1border1/as1border2)."""
     if spec is None:
         return None
+    # models sometimes pass a LIST of nodes (e.g. ["rtr-with-acl"]) — Batfish
+    # expresses a set as a comma-separated string, so join them (str(list) would
+    # produce "['rtr-with-acl']", which crashes the engine). Recurse so each
+    # element is individually normalized.
+    if isinstance(spec, (list, tuple, set)):
+        parts = [p for p in (_normalize_node_spec(x) for x in spec) if p]
+        return ",".join(parts) if parts else None
     s = str(spec).strip()
     if not s:
         return None
