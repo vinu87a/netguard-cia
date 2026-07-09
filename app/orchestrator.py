@@ -1486,10 +1486,15 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # MAX_VERIFY_CYCLES times. If still incomplete, proceed with the verifier's
     # recommended_floor (typically INSUFFICIENT-DATA). Deterministic guards
     # remain the hard floor underneath this.
-    verify_cap = MAX_VERIFY_CYCLES_QUERY if mode == "query" else MAX_VERIFY_CYCLES
+    # Read-only QUERY turns SKIP the verifier entirely: it is an adversarial
+    # CHANGE-verdict reviewer, and each worker round-trip costs ~80s — not worth
+    # it for a simple lookup, where the single relevant check already answers.
+    verify_cap = MAX_VERIFY_CYCLES
     verifier_notes = None
     prev_missing = None
     for cycle in range(verify_cap + 1):
+        if mode != "change":
+            break
         engine_facts = json.dumps(tool_log, indent=1, default=str)
         verifier_notes = _run_verifier(provider, ledger, user_text,
                                        engine_facts, notify, mode=mode)
