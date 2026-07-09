@@ -483,6 +483,60 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "test_route_policy",
+        "description": (
+            "Evaluate how a route-map / routing policy processes a SPECIFIC BGP "
+            "route announcement: returns PERMIT or DENY, the modified output "
+            "route (communities, local-pref, metric …), and the matched clause. "
+            "Use for 'how is prefix X treated by this policy?' and to check a "
+            "route-map edit's effect. input_route needs at least {\"network\": "
+            "\"<prefix>\"}; optional asPath (list of ASNs), communities (list), "
+            "localPreference, metric. direction is 'in' or 'out'. Optionally "
+            "scope with policies (name/regex) and nodes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "input_route": {"type": "object",
+                                 "description": "announcement, e.g. {\"network\": "
+                                 "\"10.0.0.0/24\", \"asPath\": [65001]}"},
+                "direction": {"type": "string", "enum": ["in", "out"]},
+                "policies": {"type": "string",
+                              "description": "optional policy name/regex"},
+                "nodes": {"type": "string",
+                           "description": "optional node specifier"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["input_route", "direction"],
+        },
+    },
+    {
+        "name": "search_route_policy",
+        "description": (
+            "Exhaustively search for route announcements a policy treats with a "
+            "given action ('permit' or 'deny') — a counterexample proof, not a "
+            "sample. Search 'deny' over the space you INTEND to permit: any "
+            "result is a route the policy wrongly drops; EMPTY means the intent "
+            "holds for the whole space. input_constraints / output_constraints "
+            "narrow the search (prefix, communities, asPath, localPreference, "
+            "med, complementPrefix)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["permit", "deny"]},
+                "input_constraints": {"type": "object",
+                                       "description": "e.g. {\"prefix\": "
+                                       "[\"10.0.0.0/8:8-32\"]}"},
+                "output_constraints": {"type": "object"},
+                "policies": {"type": "string"},
+                "nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -674,6 +728,18 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
         return _truncate(_ENGINE.diff(net, before, after,
                                       question=args["question"],
                                       question_args=args.get("question_args")))
+    if name == "test_route_policy":
+        return _truncate(_ENGINE.test_route_policy(
+            net, snap, args["input_route"], args["direction"],
+            policies=args.get("policies"),
+            nodes=_normalize_node_spec(args.get("nodes"))))
+    if name == "search_route_policy":
+        return _truncate(_ENGINE.search_route_policy(
+            net, snap, args["action"],
+            input_constraints=args.get("input_constraints"),
+            output_constraints=args.get("output_constraints"),
+            policies=args.get("policies"),
+            nodes=_normalize_node_spec(args.get("nodes"))))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))
     if name == "health_checks":

@@ -36,6 +36,7 @@ from pybatfish.client.asserts import (
     assert_no_unestablished_bgp_sessions,
 )
 from pybatfish.datamodel.primitives import Interface
+from pybatfish.datamodel.route import BgpRoute, BgpRouteConstraints
 from pybatfish.exception import BatfishAssertException
 
 BATFISH_DIRECT_HOST = os.environ.get("BATFISH_DIRECT_HOST", "localhost")
@@ -258,6 +259,84 @@ class DirectEngine:
 
         out["forwarding_loops"] = self.detect_loops(network, snapshot)
         return out
+
+    # -- route policies (route-map / policy-statement analysis) -----------------
+    @staticmethod
+    def _bgp_route(spec: dict) -> BgpRoute:
+        """Build a BgpRoute from a loose dict; only `network` (the prefix) is
+        truly required — everything else gets a sane default so the caller can
+        specify just the announcement it cares about."""
+        if "network" not in spec and "prefix" in spec:
+            spec = {**spec, "network": spec["prefix"]}
+        return BgpRoute(
+            network=spec["network"],
+            originatorIp=spec.get("originatorIp", "0.0.0.0"),
+            originType=spec.get("originType", "egp"),
+            protocol=spec.get("protocol", "bgp"),
+            asPath=spec.get("asPath", []),
+            communities=spec.get("communities", []),
+            localPreference=spec.get("localPreference", 0),
+            metric=spec.get("metric", 0),
+        )
+
+    def test_route_policy(self, network: str, snapshot: str, input_routes,
+                          direction: str, policies: str | None = None,
+                          nodes: str | None = None) -> dict:
+        """Evaluate how a route-map/policy processes a concrete route: returns
+        PERMIT/DENY, the output route (modified attributes), and the matched
+        clause trace. `direction` is 'in' or 'out'."""
+        bf = self._session(network, snapshot)
+        routes = input_routes if isinstance(input_routes, list) else [input_routes]
+        kwargs: dict[str, Any] = {
+            "inputRoutes": [self._bgp_route(r) for r in routes],
+            "direction": direction,
+        }
+        if policies:
+            kwargs["policies"] = policies
+        if nodes:
+            kwargs["nodes"] = nodes
+        df = bf.q.testRoutePolicies(**kwargs).answer().frame()
+        return {"tested": len(kwargs["inputRoutes"]), "direction": direction,
+                "result_count": int(len(df)), "results": _records(df)}
+
+    @staticmethod
+    def _route_constraints(spec: dict) -> BgpRouteConstraints:
+        return BgpRouteConstraints(
+            prefix=spec.get("prefix"),
+            complementPrefix=spec.get("complementPrefix"),
+            localPreference=spec.get("localPreference"),
+            med=spec.get("med"),
+            communities=spec.get("communities"),
+            asPath=spec.get("asPath"),
+        )
+
+    def search_route_policy(self, network: str, snapshot: str, action: str,
+                            input_constraints: dict | None = None,
+                            output_constraints: dict | None = None,
+                            policies: str | None = None,
+                            nodes: str | None = None) -> dict:
+        """Search for route announcements a policy treats with `action`
+        ('permit'|'deny'). Each returned row is a concrete counterexample: e.g.
+        searching 'deny' over your intended-permit space, any row is a route the
+        policy wrongly drops. Empty results = the intent holds for the whole
+        space (a proof, not a sample)."""
+        bf = self._session(network, snapshot)
+        kwargs: dict[str, Any] = {"action": action}
+        if input_constraints:
+            kwargs["inputConstraints"] = self._route_constraints(input_constraints)
+        if output_constraints:
+            kwargs["outputConstraints"] = self._route_constraints(output_constraints)
+        if policies:
+            kwargs["policies"] = policies
+        if nodes:
+            kwargs["nodes"] = nodes
+        df = bf.q.searchRoutePolicies(**kwargs).answer().frame()
+        return {"action_searched": action,
+                "counterexample_count": int(len(df)),
+                "note": ("each row is a route announcement for which the policy "
+                         "takes the searched action; empty means no such route "
+                         "exists in the constrained space (an exhaustive proof)"),
+                "counterexamples": _records(df)}
 
     # -- topology edges (for the UI diagram) ---------------------------------------
     def layer3_edges(self, network: str, snapshot: str) -> list[dict]:

@@ -140,6 +140,8 @@ FRIENDLY_CHECK = {
     "stage_change_snapshot": "Configuration change",
     "snapshot_gates": "Health gates",
     "differential_query": "Before/after diff",
+    "test_route_policy": "Route-policy test",
+    "search_route_policy": "Route-policy search",
 }
 def _loads(result: str):
     try:
@@ -204,6 +206,17 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
             cmp_ = r.get("compared", {})
             target = f"{r.get('question')}: {cmp_.get('before')} vs {cmp_.get('after')}"
             outcome = f"{r.get('changed_row_count', '?')} rows changed"
+        elif tool == "test_route_policy" and isinstance(r, dict):
+            ir = args.get("input_route", {})
+            target = f"{ir.get('network', ir.get('prefix', '?'))} {args.get('direction', '')}"
+            actions = sorted({str(x.get("Action")) for x in (r.get("results") or [])})
+            outcome = (f"{r.get('result_count', 0)} policy results"
+                       + (f" | {', '.join(actions)}" if actions else ""))
+        elif tool == "search_route_policy" and isinstance(r, dict):
+            target = f"action={args.get('action')}"
+            n = r.get("counterexample_count", "?")
+            outcome = (f"{n} counterexamples"
+                       + (" (intent holds)" if n == 0 else ""))
         elif tool == "routes_to" and isinstance(r, dict):
             target = f"RIB routes to {args.get('prefix')}"
             outcome = f"{r.get('route_count')} routes"

@@ -108,6 +108,13 @@ CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
 - Session claims → bgp_session_status (not check_routing, which only confirms a
   protocol process exists). Selected routes → routes_to. Reachability →
   traceroute / simulate_traffic / bidirectional tools.
+- ROUTE-MAP / ROUTING-POLICY scenarios (filtering, prepending, community/
+  local-pref/metric edits): never reason about the policy yourself. Use
+  test_route_policy to see how a SPECIFIC announcement is treated (PERMIT/DENY +
+  modified attributes), and search_route_policy for a proof over a whole space —
+  search action="deny" across the prefixes you INTEND to permit; any
+  counterexample is a route wrongly dropped, empty means the intent holds. For a
+  route-map EDIT, test the same announcement on base vs the changed snapshot.
 - traceroute/simulate destinations must be a host IP or a node that exists in
   the model — a bare prefix like 2.128.0.0/16 will not resolve; use a host in
   it (e.g. 2.128.0.1).
@@ -215,12 +222,14 @@ BINDING RULES:
 
 PLAIN LANGUAGE (mandatory): never use internal check identifiers
 (apply_failure_set, network_traceroute, differential_reachability,
-differential_query, snapshot_gates, batfish_*, network_*), the words
-"Batfish"/"engine"/"MCP", or internal state names (fail1, change1, base). Use:
-failure simulation, path trace, traffic simulation, two-way reachability check,
-BGP session check, before/after comparison, before/after diff, health gates,
-loop check, route-table lookup, configuration health check, configuration
-change. Refer to states as "the original network" / "after the change".
+differential_query, snapshot_gates, test_route_policy, search_route_policy,
+batfish_*, network_*), the words "Batfish"/"engine"/"MCP", or internal state
+names (fail1, change1, base). Use: failure simulation, path trace, traffic
+simulation, two-way reachability check, BGP session check, before/after
+comparison, before/after diff, health gates, loop check, route-table lookup,
+routing-policy test, routing-policy search, configuration health check,
+configuration change. Refer to states as "the original network" / "after the
+change".
 
 VENDOR REFERENCE (for [vendor-doc] steps; use only in migration reasoning):
 - BGP best-path order differs: Cisco = WEIGHT → LOCAL_PREF → local → AS_PATH →
