@@ -518,6 +518,36 @@ def _normalize_iface(spec: str) -> str:
     return f"{m.group(1)}[{m.group(2).strip()}]" if m else spec
 
 
+_NODE_REGEX_META = re.compile(r"[\\^$()|\[\]*+?{}]")
+
+
+def _normalize_node_spec(spec):
+    """Coerce a model-supplied node specifier into valid Batfish grammar.
+
+    Batfish node specifiers accept a bare name, a comma-separated set, or a
+    regex wrapped in /.../. Models routinely emit a raw anchored regex like
+    '^(border1|border2)$', which the parboiled parser rejects outright (and
+    the failure previously tore down the whole turn). Wrap anything that looks
+    like a regex in slashes; since Batfish matches regexes with find(), drop a
+    redundant leading ^ / trailing $ so the common substring intent survives
+    (e.g. '^(border1|border2)$' -> '/(border1|border2)/', which matches
+    as1border1/as1border2)."""
+    if spec is None:
+        return None
+    s = str(spec).strip()
+    if not s:
+        return None
+    if len(s) > 1 and s.startswith("/") and s.endswith("/"):
+        return s  # already a regex literal
+    if _NODE_REGEX_META.search(s):
+        if s.startswith("^"):
+            s = s[1:]
+        if s.endswith("$"):
+            s = s[:-1]
+        return f"/{s}/"
+    return s  # bare name or comma-separated set — valid as-is
+
+
 def _coerce_failure_args(args: dict) -> dict:
     """Tolerate the loose failure-set arg shapes these models emit and coerce to
     {node_failures, interface_failures}. Handles the schema shape plus common
@@ -612,7 +642,7 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
         return _truncate(_ENGINE.health_checks(net, snap))
     if name == "routes_to":
         return _truncate(_ENGINE.routes_to(net, snap, args["prefix"],
-                                           args.get("nodes")))
+                                           _normalize_node_spec(args.get("nodes"))))
 
     if name == "batfish_failure_impact":
         return _truncate(ops.failure_impact(net, snap, args["failure_type"], args["target"]))
@@ -773,6 +803,12 @@ def _translator_rounds(provider, ops: BatfishOps, ledger: Ledger,
                 is_error = out.startswith("ERROR")
             except MCPToolError as e:
                 out, is_error = f"ERROR: {e}", True
+            except Exception as e:
+                # Any engine/tool failure (e.g. a malformed specifier the model
+                # supplied) is fed back as an ERROR result so the translator can
+                # correct itself — it must never tear down the whole turn.
+                out = f"ERROR: {tc.name} failed: {type(e).__name__}: {str(e)[:400]}"
+                is_error = True
             tool_log.append({"tool": tc.name, "input": tc.arguments,
                              "result": out, "is_error": is_error})
             messages.append({"role": "tool", "tool_call_id": tc.id,
