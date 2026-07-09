@@ -405,7 +405,11 @@ ROLLBACK: <steps; clean revert? yes/no>
 RESIDUAL-UNKNOWNS: <what config-only analysis cannot see>
 
 --- OUTPUT MODE: QUERY ---
-ANSWER: <directly answer the user's question in one or two sentences>
+ANSWER: <directly answer the user's question. If the question asks to LIST or
+  enumerate specific items (flows, routes, sessions, ACL lines), enumerate the
+  ACTUAL items from the results — not counts or categories; if there are many,
+  list them compactly (bullets/table) and note the total. Answer ONLY what was
+  asked — do not pull in unrelated findings.>
 STATUS: <OK | ATTENTION>   (ATTENTION only if the answer surfaces a real problem)
 CONFIDENCE: <High | Medium | Low>
 EVIDENCE: <the specific check result(s) that establish the answer>

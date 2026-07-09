@@ -86,8 +86,12 @@ _SYNTHESIZER_FORMAT_QUERY = (
     'This is a read-only QUESTION, not a proposed change — do NOT give a Go/No-Go '
     'verdict. Output two zones. First a line "FINDINGS" then one bullet per check '
     'tagged [verified]. Then a line beginning "ANSWER:" that directly answers the '
-    'question in one or two sentences, and these headers each on their own line: '
-    'STATUS: <OK|ATTENTION>, CONFIDENCE:, EVIDENCE:, RESIDUAL-UNKNOWNS:. Use '
+    'question, and these headers each on their own line: STATUS: <OK|ATTENTION>, '
+    'CONFIDENCE:, EVIDENCE:, RESIDUAL-UNKNOWNS:. If the question asks to LIST or '
+    'enumerate specific items (flows, routes, sessions, ACL lines), the ANSWER '
+    'MUST enumerate the ACTUAL items from the results — not counts or categories; '
+    'if there are many, list them (a compact table/bullets) and note the total. '
+    'Answer only what was asked — do not bring in unrelated findings. Use '
     'ATTENTION only if the answer surfaces a real problem. Plain language only — '
     'no internal check names, no "Batfish", no snapshot IDs.'
 )
@@ -1273,12 +1277,15 @@ class ScenarioResult:
 
 
 def _scenario_mode(ledger: Ledger, tool_log: list[dict]) -> str:
-    """CHANGE if the turn actually mutated the network (a failure or config edit
-    was applied), else QUERY (read-only). Deterministic — no LLM guess: a
-    Go/No-Go verdict only makes sense when there is a proposed change to approve;
-    a read-only question gets a direct answer instead."""
-    if ledger.current != ledger.base:
-        return "change"
+    """CHANGE if THIS turn proposed/applied a mutation (a failure or config edit),
+    else QUERY (read-only). Deterministic — no LLM guess: a Go/No-Go verdict only
+    makes sense when this turn is proposing a change to approve.
+
+    Keyed on this turn's tool_log, NOT on ledger.current != base: once a failure
+    has been applied earlier in the session the ledger stays 'dirty', but a
+    later read-only follow-up ("list the flows that changed", "is DNS reachable
+    now?") is still a QUERY and must get a direct answer, not a re-issued
+    verdict."""
     applied = any(
         e.get("tool") in ("apply_failure_set", "stage_change_snapshot")
         and not e.get("is_error") for e in tool_log)
@@ -1444,7 +1451,7 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # reported as facts but do not sink the verdict. This floor sits UNDER the
     # LLM verifier — the model may tighten it, never talk past it.
     gate_floor = ""
-    if ledger.current and ledger.current != ledger.base:
+    if mode == "change" and ledger.current and ledger.current != ledger.base:
         notify("Running: Health gates")
         try:
             after_g = _ENGINE.snapshot_gates(ledger.network, ledger.current)
