@@ -1211,6 +1211,34 @@ _TRANSLATOR_REASSERT = (
     "one JSON tool call: {\"tool\": ..., \"args\": { ... }}.")
 
 
+def _checks_run_summary(tool_log: list[dict]) -> str:
+    """Compact, authoritative recap of every check already run THIS question, so
+    the translator never depends on the worker's conversation memory to know
+    what is already covered (avoids repeats and premature 'done')."""
+    if not tool_log:
+        return "(none yet)"
+    lines = []
+    for i, e in enumerate(tool_log, 1):
+        args = json.dumps(e.get("input", {}), default=str)
+        if len(args) > 140:
+            args = args[:137] + "..."
+        out = str(e.get("result", "")).replace("\n", " ")
+        lines.append(f"{i}. {e['tool']} {args} -> {out[:110]}")
+    return "\n".join(lines)
+
+
+_CHECKS_RUN_HEADER = ("\n\n## CHECKS ALREADY RUN (this question) — authoritative; "
+                      "trust this list over memory, do NOT repeat these:\n")
+
+
+def _append_checks_recap(messages: list[dict], tool_log: list[dict]) -> None:
+    """Attach the cumulative recap to the most recent tool-result message so it
+    rides along in the delta the worker receives on its next turn."""
+    if messages and messages[-1].get("role") == "tool":
+        messages[-1]["content"] += (_CHECKS_RUN_HEADER
+                                     + _checks_run_summary(tool_log))
+
+
 def _translator_rounds(provider, ops: BatfishOps, ledger: Ledger,
                        messages: list[dict], tool_log: list[dict],
                        notify) -> str:
@@ -1255,6 +1283,10 @@ def _translator_rounds(provider, ops: BatfishOps, ledger: Ledger,
                              "result": out, "is_error": is_error})
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": out})
+        # ride the cumulative recap along with this round's last result, so the
+        # translator's next turn always has the full picture even if the worker
+        # forgets earlier conversation state.
+        _append_checks_recap(messages, tool_log)
     return ""
 
 
@@ -1285,7 +1317,8 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
             "reachability probe to confirm the specific service flow the user "
             "asked about. Run network_traceroute for that flow from an interior "
             "device (and differential_reachability + detect_loops if not already "
-            "run). Then reply READY FOR SYNTHESIS.")})
+            "run). Then reply READY FOR SYNTHESIS."
+            + _CHECKS_RUN_HEADER + _checks_run_summary(tool_log))})
         final_text = _translator_rounds(provider, ops, ledger, messages,
                                         tool_log, notify) or final_text
 
@@ -1354,7 +1387,8 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
             "VERIFIER found the investigation incomplete. Missing: "
             + json.dumps(missing) + ". Run exactly these checks now (e.g. "
             "traceroute from an interior device, differential_reachability, "
-            "detect_loops as applicable), then reply READY FOR SYNTHESIS.")})
+            "detect_loops as applicable), then reply READY FOR SYNTHESIS."
+            + _CHECKS_RUN_HEADER + _checks_run_summary(tool_log))})
         _translator_rounds(provider, ops, ledger, messages, tool_log, notify)
 
     engine_facts = json.dumps(tool_log, indent=1, default=str)

@@ -64,7 +64,10 @@ in this order, these labelled blocks:
     ## DEVICE INVENTORY         (the nodes, interfaces, and vendors that exist)
     ## AVAILABLE CHECKS (JSON schemas)   (the tools you may call — the ONLY ones)
     ## USER QUESTION            (what to answer)
-plus any TOOL RESULT: blocks from checks already run.
+plus any TOOL RESULT: blocks from checks already run. After the first check, a
+TOOL RESULT also carries a "## CHECKS ALREADY RUN (this question)" list — that
+list is AUTHORITATIVE: trust it over your own memory, never re-run a check that
+already appears on it, and use it to decide what is still missing.
 
 THESE BLOCKS ARE ALWAYS PRESENT. You must NEVER claim you are missing the
 SESSION STATE, the DEVICE INVENTORY, or the AVAILABLE CHECKS / tool schemas —
