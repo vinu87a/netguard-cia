@@ -1417,12 +1417,12 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         missing_key = _norm_probes(missing)
         if missing_key == prev_missing:
             notify("Verifier is repeating the same gaps — proceeding with a "
-                   "capped verdict")
+                   "capped result")
             break
         prev_missing = missing_key
         if cycle >= MAX_VERIFY_CYCLES:
             notify("Verifier still flags gaps after "
-                   f"{MAX_VERIFY_CYCLES} cycles — proceeding with a capped verdict")
+                   f"{MAX_VERIFY_CYCLES} cycles — proceeding with a capped result")
             break
         notify(f"Verifier flagged gaps (cycle {cycle + 1}/{MAX_VERIFY_CYCLES}) "
                "— gathering more evidence")
@@ -1438,7 +1438,7 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         # only repeat the same gap — stop and let the floor apply.
         if len(tool_log) == n_before:
             notify("No new checks could be gathered — proceeding with a capped "
-                   "verdict")
+                   "result")
             break
 
     engine_facts = json.dumps(tool_log, indent=1, default=str)
