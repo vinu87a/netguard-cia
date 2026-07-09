@@ -197,9 +197,11 @@ def render_answer(result, topo=None, live=True) -> tuple[str, dict | None]:
     st.markdown(result.verdict)
     parts.append(f"**{zone_label.capitalize()}**\n\n{result.verdict}")
 
-    # before/after topology when the scenario changed the network. On the live
-    # turn we query the engine once and snapshot the edges; on replay we reuse
-    # that snapshot so the diagram matches THAT turn (not the current ledger).
+    # before/after topology when the scenario changed the network. This builds
+    # matplotlib figures (expensive), so only do it on the LIVE turn — NOT on
+    # every history replay, which would regenerate N figures on every rerun and
+    # crawl. History keeps its (cheap) banner/tables/findings; the diagram is
+    # shown for the turn you just ran.
     topo_out = topo
     ledger = st.session_state.ledger
     if live and ledger.current != ledger.base and st.session_state.base_edges is not None:
@@ -207,11 +209,6 @@ def render_answer(result, topo=None, live=True) -> tuple[str, dict | None]:
             topo_out = {"cur_edges": get_engine().layer3_edges(
                             ledger.network, ledger.current),
                         "failed_nodes": list(ledger.node_failures)}
-        except Exception as e:
-            st.caption(f"(topology diagram unavailable: {e})")
-            topo_out = None
-    if topo_out and st.session_state.base_edges is not None:
-        try:
             before, after = before_after_figures(
                 st.session_state.base_edges, topo_out["cur_edges"],
                 failed_nodes=topo_out.get("failed_nodes"),
@@ -224,8 +221,12 @@ def render_answer(result, topo=None, live=True) -> tuple[str, dict | None]:
                 st.pyplot(after, width="stretch")
             st.caption("Dashed red = links lost vs the original network; "
                        "red devices = failed.")
+            import matplotlib.pyplot as _plt   # free the figures (avoid leak)
+            _plt.close(before)
+            _plt.close(after)
         except Exception as e:
             st.caption(f"(topology diagram unavailable: {e})")
+            topo_out = None
 
     with st.expander(f"Analysis details — advanced ({len(result.tool_log)} checks)"):
         for entry in result.tool_log:
