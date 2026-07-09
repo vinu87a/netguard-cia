@@ -457,6 +457,32 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "differential_query",
+        "description": (
+            "Native engine diff of ONE table question between the base snapshot "
+            "and the current changed/failed snapshot — returns only the rows that "
+            "changed. Use to show exactly what an edit or failure altered for a "
+            "specific class of fact. `question` is one of: routes, bgpRib, "
+            "bgpSessionStatus, bgpPeerConfiguration, bgpEdges, interfaceProperties, "
+            "nodeProperties, definedStructures, undefinedReferences, ospfEdges, "
+            "edges. Optional `question_args` scope it, e.g. {\"network\": "
+            "\"2.128.0.0/16\"} for routes or {\"nodes\": \"/as1/\"}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string",
+                              "description": "diffable question name (see list above)"},
+                "question_args": {"type": "object",
+                                   "description": "optional kwargs passed to the question"},
+                "reference_snapshot": {"type": "string",
+                                        "description": "before-snapshot (default: base)"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["question"],
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -636,6 +662,18 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
         out = _ENGINE.differential_reachability(net, after, before)
         out["compared"] = {"before": before, "after": after}
         return _truncate(out)
+    if name == "differential_query":
+        after = args.get("snapshot") or ledger.current
+        before = args.get("reference_snapshot") or ledger.base
+        if after == before:
+            return ("ERROR: nothing to diff — the current snapshot equals the "
+                    "reference; apply a change/failure first")
+        if args.get("question") not in _ENGINE.DIFFABLE_QUESTIONS:
+            return ("ERROR: question must be one of "
+                    + json.dumps(sorted(_ENGINE.DIFFABLE_QUESTIONS)))
+        return _truncate(_ENGINE.diff(net, before, after,
+                                      question=args["question"],
+                                      question_args=args.get("question_args")))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))
     if name == "health_checks":
@@ -852,6 +890,42 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         return ScenarioResult("", "", tool_log, clarification=final_text or
                               "I couldn't classify that scenario — can you rephrase?")
 
+    # ---- deterministic assertion floor (engine's own health gates) -------
+    # If the scenario produced a changed/failed snapshot, run the parameterless
+    # assertion gates on it. Only gates that REGRESS (newly fail vs base) are
+    # attributable to this change and force NO-GO; pre-existing failures are
+    # reported as facts but do not sink the verdict. This floor sits UNDER the
+    # LLM verifier — the model may tighten it, never talk past it.
+    gate_floor = ""
+    if ledger.current and ledger.current != ledger.base:
+        notify("Running: Health gates")
+        try:
+            after_g = _ENGINE.snapshot_gates(ledger.network, ledger.current)
+            regressed: list[str] = []
+            if after_g["gates_failed"]:
+                before_g = _ENGINE.snapshot_gates(ledger.network, ledger.base)
+                pre = {r["gate"] for r in before_g["results"]
+                       if r["passed"] is False}
+                regressed = [r["gate"] for r in after_g["results"]
+                             if r["passed"] is False and r["gate"] not in pre]
+            tool_log.append({
+                "tool": "snapshot_gates",
+                "input": {"after": ledger.current, "before": ledger.base},
+                "result": json.dumps(
+                    {**after_g, "regressed_gates": regressed,
+                     "note": "regressed_gates newly fail on the change and are "
+                             "attributable to it; any other failures pre-exist "
+                             "on base and are not caused by this change"},
+                    default=str),
+                "is_error": bool(regressed)})
+            if regressed:
+                gate_floor = (
+                    "\nGATE FLOOR: the engine's own health assertions newly FAIL "
+                    f"on the changed snapshot ({', '.join(regressed)}). This "
+                    "change breaks network health — the verdict MUST be NO-GO.\n")
+        except Exception as e:  # gates are a floor, never a turn-killer
+            notify(f"Health gates could not run ({type(e).__name__})")
+
     # ---- bounded verify -> remediate -> re-verify loop -------------------
     # The verifier is an adversarial second opinion. When it reports gaps, feed
     # the missing checks back to the translator and verify again — up to
@@ -884,11 +958,11 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # ---- synthesizer -----------------------------------------------------
     notify("Synthesizing verdict")
 
-    floor = ""
+    floor = gate_floor
     if verifier_notes and verifier_notes.get("recommended_floor"):
-        floor = ("\nVERIFIER FLOOR: an independent review recommends the verdict "
-                 f"be no better than {verifier_notes['recommended_floor']} — do "
-                 "not exceed it unless the results clearly refute the concern.\n")
+        floor += ("\nVERIFIER FLOOR: an independent review recommends the verdict "
+                  f"be no better than {verifier_notes['recommended_floor']} — do "
+                  "not exceed it unless the results clearly refute the concern.\n")
 
     synth_user = f"""## SCENARIO (user's words)
 {user_text}

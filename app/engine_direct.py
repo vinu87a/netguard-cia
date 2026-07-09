@@ -27,7 +27,16 @@ from pathlib import Path
 from typing import Any
 
 from pybatfish.client.session import Session
+from pybatfish.client.asserts import (
+    assert_no_duplicate_router_ids,
+    assert_no_forwarding_loops,
+    assert_no_incompatible_bgp_sessions,
+    assert_no_incompatible_ospf_sessions,
+    assert_no_undefined_references,
+    assert_no_unestablished_bgp_sessions,
+)
 from pybatfish.datamodel.primitives import Interface
+from pybatfish.exception import BatfishAssertException
 
 BATFISH_DIRECT_HOST = os.environ.get("BATFISH_DIRECT_HOST", "localhost")
 # No row cap — the worker has a large context window; return all rows.
@@ -141,6 +150,88 @@ class DirectEngine:
         bf = self._session(network, snapshot)
         df = bf.q.detectLoops().answer().frame()
         return {"loop_count": int(len(df)), "loops": _records(df)}
+
+    # -- deterministic Go/No-Go gates (pybatfish.client.asserts) ----------------
+    # The engine's OWN definition of a healthy snapshot, expressed as
+    # parameterless assertions. These form the hard verdict FLOOR: run on the
+    # change snapshot before any GO, and the LLM verifier may only tighten them,
+    # never override. soft=False raises BatfishAssertException carrying the
+    # offending rows, which we surface verbatim as the failure detail.
+    _GATES = (
+        ("no_forwarding_loops", assert_no_forwarding_loops),
+        ("no_incompatible_bgp_sessions", assert_no_incompatible_bgp_sessions),
+        ("no_unestablished_bgp_sessions", assert_no_unestablished_bgp_sessions),
+        ("no_incompatible_ospf_sessions", assert_no_incompatible_ospf_sessions),
+        ("no_undefined_references", assert_no_undefined_references),
+        ("no_duplicate_router_ids", assert_no_duplicate_router_ids),
+    )
+
+    def snapshot_gates(self, network: str, snapshot: str) -> dict:
+        """Run the parameterless assertion gates against one snapshot and return
+        a structured pass/fail floor. A gate that ERRORS (e.g. a question needs a
+        dataplane that could not be computed) is reported as passed=None, not
+        failed — an inconclusive gate must not masquerade as a clean pass."""
+        bf = self._session(network, snapshot)
+        results: list[dict] = []
+        for name, fn in self._GATES:
+            try:
+                fn(session=bf, snapshot=snapshot)
+                results.append({"gate": name, "passed": True})
+            except BatfishAssertException as e:
+                results.append({"gate": name, "passed": False,
+                                "detail": str(e)[:2000]})
+            except Exception as e:  # noqa: BLE001 — inconclusive, not a pass
+                results.append({"gate": name, "passed": None,
+                                "error": f"{type(e).__name__}: {str(e)[:300]}"})
+        failed = [r for r in results if r["passed"] is False]
+        inconclusive = [r for r in results if r["passed"] is None]
+        return {
+            "gates_run": len(results),
+            "gates_passed": sum(1 for r in results if r["passed"] is True),
+            "gates_failed": len(failed),
+            "gates_inconclusive": len(inconclusive),
+            "all_passed": not failed and not inconclusive,
+            "results": results,
+        }
+
+    # -- generic native diff: any table question, base-vs-change ----------------
+    # Batfish runs ANY table question differentially when .answer() gets a
+    # reference_snapshot, returning only rows that differ between the two
+    # snapshots. This is the engine-authoritative "what changed" that replaces
+    # app-side hand-diffing, and it is the FINDINGS engine for edit scenarios.
+    DIFFABLE_QUESTIONS = {
+        "routes", "bgpRib", "bgpSessionStatus", "bgpPeerConfiguration",
+        "bgpEdges", "interfaceProperties", "nodeProperties",
+        "definedStructures", "undefinedReferences", "namedStructures",
+        "ospfEdges", "edges",
+    }
+
+    def diff(self, network: str, before: str, after: str,
+             question: str = "routes",
+             question_args: dict | None = None) -> dict:
+        """Run one table question differentially (reference=before, snapshot=
+        after) and return only the changed rows. `question` must be in
+        DIFFABLE_QUESTIONS; `question_args` are passed to the question builder
+        (e.g. {'nodes': '/as1/'} or {'network': '2.128.0.0/16'})."""
+        if question not in self.DIFFABLE_QUESTIONS:
+            raise ValueError(
+                f"question {question!r} is not diffable; choose one of "
+                f"{sorted(self.DIFFABLE_QUESTIONS)}")
+        if before == after:
+            raise ValueError(f"before and after are both {after!r}")
+        bf = self._session(network)
+        builder = getattr(bf.q, question)
+        q = builder(**(question_args or {}))
+        df = q.answer(snapshot=after, reference_snapshot=before).frame()
+        return {
+            "question": question,
+            "compared": {"before": before, "after": after},
+            "changed_row_count": int(len(df)),
+            "note": ("rows that differ between the two snapshots (present in "
+                     "only one, or with changed values); empty means this "
+                     "question sees no change from the edit"),
+            "changed": _records(df),
+        }
 
     # -- config/health checks ----------------------------------------------------
     def health_checks(self, network: str, snapshot: str) -> dict:

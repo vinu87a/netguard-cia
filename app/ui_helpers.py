@@ -138,6 +138,8 @@ FRIENDLY_CHECK = {
     "routes_to": "Route lookup",
     "batfish_check_routing": "Routing process check",
     "stage_change_snapshot": "Configuration change",
+    "snapshot_gates": "Health gates",
+    "differential_query": "Before/after diff",
 }
 def _loads(result: str):
     try:
@@ -155,7 +157,9 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
         r = _loads(e["result"])
         target, outcome = "", ""
 
-        if e.get("is_error"):
+        # snapshot_gates carries is_error=True to mean "a gate regressed", not
+        # "the tool failed" — let it render via its own case below.
+        if e.get("is_error") and tool != "snapshot_gates":
             target = json.dumps(args)[:60]
             outcome = str(e["result"])[:120]
         elif tool == "network_traceroute" and isinstance(r, dict):
@@ -190,6 +194,16 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
         elif tool == "detect_loops" and isinstance(r, dict):
             target = "forwarding loops"
             outcome = f"{r.get('loop_count')} loops"
+        elif tool == "snapshot_gates" and isinstance(r, dict):
+            target = "engine health assertions"
+            regressed = r.get("regressed_gates") or []
+            outcome = (f"{r.get('gates_passed')}/{r.get('gates_run')} passed"
+                       + (f" | REGRESSED: {', '.join(regressed)}" if regressed
+                          else " | no regressions"))
+        elif tool == "differential_query" and isinstance(r, dict):
+            cmp_ = r.get("compared", {})
+            target = f"{r.get('question')}: {cmp_.get('before')} vs {cmp_.get('after')}"
+            outcome = f"{r.get('changed_row_count', '?')} rows changed"
         elif tool == "routes_to" and isinstance(r, dict):
             target = f"RIB routes to {args.get('prefix')}"
             outcome = f"{r.get('route_count')} routes"

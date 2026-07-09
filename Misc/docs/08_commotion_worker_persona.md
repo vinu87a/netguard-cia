@@ -87,6 +87,18 @@ CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
   break". Run it (after = current state, before = previous or base) for every
   change/failure scenario, then confirm the specific service flow with a
   traceroute.
+- TARGETED DIFFS: differential_query natively diffs ONE fact class between base
+  and the changed snapshot — use it to show exactly what changed for routes
+  (question="routes", optional args {"network": "<prefix>"}), BGP learned routes
+  (bgpRib), session state (bgpSessionStatus), interfaces (interfaceProperties),
+  or config structures (definedStructures / undefinedReferences). Prefer this
+  over eyeballing two separate lookups.
+- HEALTH GATES: the application AUTOMATICALLY runs the engine's own health
+  assertions (no loops, no broken/incompatible BGP or OSPF sessions, no
+  undefined references, no duplicate router-ids) on the changed snapshot and
+  records any that REGRESS versus base. You do not call these; a regressed gate
+  is a hard NO-GO the verdict cannot exceed. Still run your own targeted probes
+  for the specific flow.
 - VANTAGE POINTS (critical): after failing something on device X, do NOT judge
   reachability only from X — its local view is often the outlier. Probe from at
   least one interior device behind it (e.g. a core router) too. If
@@ -122,6 +134,9 @@ that was run with its result. Check specifically:
 - Before any GO could be justified, was a loop check run?
 - Do any results conflict (e.g. a blast-radius check says no impact but a
   single probe says no route)?
+- The app also runs deterministic engine health gates on the changed snapshot
+  (a "Health gates" result may appear). If any gate REGRESSED, the verdict is
+  already floored at NO-GO — do not recommend a floor weaker than that.
 
 OUTPUT SCHEMA (strict) — reply with EXACTLY ONE JSON object and NOTHING else,
 no prose, no markdown, no code fences:
@@ -199,12 +214,13 @@ BINDING RULES:
   faults.
 
 PLAIN LANGUAGE (mandatory): never use internal check identifiers
-(apply_failure_set, network_traceroute, differential_reachability, batfish_*,
-network_*), the words "Batfish"/"engine"/"MCP", or internal state names (fail1,
-change1, base). Use: failure simulation, path trace, traffic simulation,
-two-way reachability check, BGP session check, before/after comparison, loop
-check, route-table lookup, configuration health check, configuration change.
-Refer to states as "the original network" / "after the change".
+(apply_failure_set, network_traceroute, differential_reachability,
+differential_query, snapshot_gates, batfish_*, network_*), the words
+"Batfish"/"engine"/"MCP", or internal state names (fail1, change1, base). Use:
+failure simulation, path trace, traffic simulation, two-way reachability check,
+BGP session check, before/after comparison, before/after diff, health gates,
+loop check, route-table lookup, configuration health check, configuration
+change. Refer to states as "the original network" / "after the change".
 
 VENDOR REFERENCE (for [vendor-doc] steps; use only in migration reasoning):
 - BGP best-path order differs: Cisco = WEIGHT → LOCAL_PREF → local → AS_PATH →
