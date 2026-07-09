@@ -154,6 +154,7 @@ FRIENDLY_CHECK = {
     "ospf_edges": "OSPF adjacencies",
     "ospf_process_config": "OSPF process check",
     "multipath_consistency": "ECMP consistency check",
+    "reachability_search": "Reachability proof",
 }
 def _loads(result: str):
     try:
@@ -286,6 +287,13 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
             target = "ECMP path consistency"
             n = r.get("inconsistent_count", "?")
             outcome = f"{n} inconsistent flows" + (" (clean)" if n == 0 else "")
+        elif tool == "reachability_search" and isinstance(r, dict):
+            target = (f"{args.get('start_location', 'any')} -> "
+                      f"{args.get('end_location', 'any')} [{args.get('actions')}]")
+            n = r.get("example_count", "?")
+            outcome = (f"{n} example flows"
+                       + (" (intent proven — none found)" if n == 0 else
+                          " (counterexamples exist)"))
         elif tool == "batfish_check_routing" and isinstance(r, dict):
             target = f"protocols {args.get('protocols')}"
             outcome = f"process check {r.get('overall', '?')}"

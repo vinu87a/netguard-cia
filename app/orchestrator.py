@@ -740,6 +740,40 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "reachability_search",
+        "description": (
+            "PROOF engine — exhaustively search ALL flows for a stated intent, "
+            "not a sample. To PROVE 'A always reaches B', set actions='failure', "
+            "start_location=A, end_location=B and expect ZERO examples. To PROVE "
+            "'A is isolated from B', set actions='success' and expect zero. Any "
+            "returned flow is a concrete counterexample; empty = the intent holds "
+            "for every flow. Prefer this over a single traceroute when the "
+            "question is 'is X GLOBALLY reachable / perfectly isolated'. headers "
+            "optionally narrow the packet space (dstIps, dstPorts, ipProtocols)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "actions": {"type": "string",
+                             "description": "'success', 'failure', or a specific "
+                             "disposition (e.g. NO_ROUTE, DENIED_IN)"},
+                "start_location": {"type": "string",
+                                    "description": "source device/interface"},
+                "end_location": {"type": "string",
+                                  "description": "destination location"},
+                "transit_locations": {"type": "string"},
+                "forbidden_locations": {"type": "string",
+                                         "description": "locations the flow must NOT transit"},
+                "headers": {"type": "object",
+                             "description": "optional packet space, e.g. "
+                             "{\"dstIps\": \"2.128.0.1\", \"dstPorts\": \"443\"}"},
+                "invert_search": {"type": "boolean"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["actions"],
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -998,6 +1032,15 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
         return _truncate(_ENGINE.detect_loops(net, snap))
     if name == "multipath_consistency":
         return _truncate(_ENGINE.multipath_consistency(net, snap))
+    if name == "reachability_search":
+        return _truncate(_ENGINE.reachability_search(
+            net, snap, actions=args.get("actions", "success"),
+            headers=args.get("headers"),
+            start_location=args.get("start_location"),
+            end_location=args.get("end_location"),
+            transit_locations=args.get("transit_locations"),
+            forbidden_locations=args.get("forbidden_locations"),
+            invert_search=bool(args.get("invert_search"))))
     if name == "health_checks":
         return _truncate(_ENGINE.health_checks(net, snap))
     if name == "routes_to":

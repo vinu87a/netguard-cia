@@ -35,7 +35,7 @@ from pybatfish.client.asserts import (
     assert_no_undefined_references,
     assert_no_unestablished_bgp_sessions,
 )
-from pybatfish.datamodel.flow import HeaderConstraints
+from pybatfish.datamodel.flow import HeaderConstraints, PathConstraints
 from pybatfish.datamodel.primitives import Interface
 from pybatfish.datamodel.route import BgpRoute, BgpRouteConstraints
 from pybatfish.exception import BatfishAssertException
@@ -385,6 +385,45 @@ class DirectEngine:
                 "note": ("flows whose ECMP paths disagree on delivery; empty "
                          "means all multipath is consistent"),
                 "inconsistent_flows": _records(df)}
+
+    # -- counterexample intent proof (reachability search) ----------------------
+    def reachability_search(self, network: str, snapshot: str,
+                            actions: str = "success",
+                            headers: dict | None = None,
+                            start_location: str | None = None,
+                            end_location: str | None = None,
+                            transit_locations: str | None = None,
+                            forbidden_locations: str | None = None,
+                            invert_search: bool = False) -> dict:
+        """Exhaustive flow search across the network for a stated intent. This is
+        the PROOF engine: to prove 'A always reaches B', search actions='failure'
+        with start=A end=B and expect ZERO examples; to prove 'A is isolated from
+        B', search actions='success' and expect zero. A returned flow is a
+        concrete counterexample; empty means the intent holds for ALL flows in
+        the space (not a sample)."""
+        bf = self._session(network, snapshot)
+        pc: dict[str, Any] = {}
+        if start_location:
+            pc["startLocation"] = start_location
+        if end_location:
+            pc["endLocation"] = end_location
+        if transit_locations:
+            pc["transitLocations"] = transit_locations
+        if forbidden_locations:
+            pc["forbiddenLocations"] = forbidden_locations
+        kwargs: dict[str, Any] = {"actions": actions}
+        if pc:
+            kwargs["pathConstraints"] = PathConstraints(**pc)
+        if headers:
+            kwargs["headers"] = self._headers(headers)
+        if invert_search:
+            kwargs["invertSearch"] = invert_search
+        df = bf.q.reachability(**kwargs).answer().frame()
+        return {"actions_searched": actions, "example_count": int(len(df)),
+                "note": ("example flows matching the searched dispositions; for "
+                         "a counterexample proof search the VIOLATING disposition "
+                         "and expect zero (empty = intent proven for all flows)"),
+                "examples": _records(df)}
 
     # -- route policies (route-map / policy-statement analysis) -----------------
     @staticmethod

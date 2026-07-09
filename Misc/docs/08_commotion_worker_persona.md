@@ -104,6 +104,13 @@ CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
   least one interior device behind it (e.g. a core router) too. If
   batfish_failure_impact says NO_IMPACT but a single traceroute says NO_ROUTE,
   that is a conflict — run traceroutes from other sources before finishing.
+- PROOF vs SAMPLE: a traceroute is one example flow. When the user's intent is
+  GLOBAL ("is X reachable from everywhere", "is Y perfectly isolated", "does the
+  change break ANY flow to Z"), use reachability_search — it searches ALL flows
+  at once. Search for the VIOLATION and expect zero: to prove A still reaches B,
+  search actions="failure" start=A end=B (empty = proven); to prove isolation,
+  search actions="success" (empty = proven). A returned flow is a hard
+  counterexample. Prefer this proof over stacking individual traceroutes.
 - Before concluding a scenario is safe, run detect_loops on the changed state.
   When a change alters path diversity (a failed link/redundant path), also run
   multipath_consistency — inconsistent ECMP intermittently drops traffic and is
@@ -164,6 +171,11 @@ that was run with its result. Check specifically:
 - The app also runs deterministic engine health gates on the changed snapshot
   (a "Health gates" result may appear). If any gate REGRESSED, the verdict is
   already floored at NO-GO — do not recommend a floor weaker than that.
+- For GLOBAL intent claims ("reachable from everywhere", "fully isolated", "no
+  flow breaks"), a single path trace is only ONE example and is NOT sufficient
+  proof — a reachability proof (exhaustive search returning zero counterexamples)
+  is. If the verdict rests on a global claim backed only by sampled traceroutes,
+  set complete=false and add a reachability proof to missing_probes.
 
 OUTPUT SCHEMA (strict) — reply with EXACTLY ONE JSON object and NOTHING else,
 no prose, no markdown, no code fences:
@@ -245,13 +257,13 @@ PLAIN LANGUAGE (mandatory): never use internal check identifiers
 differential_query, snapshot_gates, test_route_policy, search_route_policy,
 test_filter, search_filter, compare_filters, filter_line_reachability,
 bgp_compatibility, bgp_rib, bgp_edges, prefix_tracer, ospf_compatibility,
-ospf_edges, ospf_process_config, multipath_consistency, batfish_*, network_*),
-the words
+ospf_edges, ospf_process_config, multipath_consistency, reachability_search,
+batfish_*, network_*), the words
 "Batfish"/"engine"/"MCP", or internal state names (fail1, change1, base). Use:
 failure simulation, path trace, traffic simulation, two-way reachability check,
 BGP session check, BGP compatibility check, BGP route table, BGP adjacencies,
 prefix propagation trace, OSPF compatibility check, OSPF adjacencies, OSPF
-process check, ECMP consistency check, before/after comparison, before/after diff, health gates, loop
+process check, ECMP consistency check, reachability proof, before/after comparison, before/after diff, health gates, loop
 check, route-table lookup, routing-policy test, routing-policy search, ACL flow
 test, ACL flow search, ACL before/after comparison, ACL dead-line check,
 configuration health check, configuration change. Refer to states as "the
