@@ -56,7 +56,10 @@ class OpenAIProvider:
         self._translator_model = translator_model
         self._synthesizer_model = synthesizer_model
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None) -> LLMReply:
+    def chat(self, messages: list[dict], tools: list[dict] | None = None,
+             role: str | None = None, format_hint: str | None = None) -> LLMReply:
+        # role/format_hint are Commotion routing/format hints; Ollama uses the
+        # system prompt directly, so they're ignored here (single call surface).
         model = self._translator_model if tools else self._synthesizer_model
         try:
             resp = self._client.chat.completions.create(
@@ -78,26 +81,6 @@ class OpenAIProvider:
 # ---------------------------------------------------------------------------
 # Commotion (Tata Communications AI worker)
 # ---------------------------------------------------------------------------
-_TOOL_PROTOCOL = """
-## ACTION PROTOCOL (follow exactly)
-The external application that sent this message executes network checks on
-your behalf. The checks are listed below as JSON schemas. They are NOT
-platform functions or tools of yours — do NOT try to invoke any built-in
-function, and do NOT say a check is unavailable. You only CHOOSE the next
-check; the application runs it and sends you the outcome.
-
-To request a check: respond ONLY with a single JSON object, no prose, no code
-fences, in this exact format:
-{"tool": "<check name>", "args": { ...arguments matching the schema... }}
-
-One check per reply. After each request you will receive a message starting
-with TOOL RESULT containing the outcome; then respond with your next JSON
-request. When your investigation is complete, respond with plain text (NOT
-JSON), following the instructions you were given for the final message.
-
-## AVAILABLE CHECKS (JSON schemas)
-"""
-
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
@@ -137,18 +120,22 @@ class CommotionProvider:
         return data
 
     # -- rendering the neutral transcript into message text ------------------
+    # The worker owns all behavioral instructions (via its system prompt); the
+    # app sends only data. For the translator we also include the machine-
+    # generated check catalog, since it is generated from the live engine and
+    # must stay in sync with the code.
     @staticmethod
     def _render(msg: dict, tools: list[dict] | None) -> str:
         role = msg["role"]
         if role == "system":
-            out = f"## INSTRUCTIONS\n{msg['content']}"
+            out = f"## CONTEXT\n{msg['content']}"
             if tools:
                 schemas = "\n".join(
                     json.dumps({"name": t["function"]["name"],
                                 "description": t["function"]["description"],
                                 "parameters": t["function"]["parameters"]})
                     for t in tools)
-                out += _TOOL_PROTOCOL + schemas
+                out += "\n\n## AVAILABLE CHECKS (JSON schemas)\n" + schemas
             return out
         if role == "user":
             return f"## USER QUESTION\n{msg['content']}"
@@ -168,7 +155,8 @@ class CommotionProvider:
         return (id(messages), hash(head))
 
     # -- main entry ----------------------------------------------------------
-    def chat(self, messages: list[dict], tools: list[dict] | None = None) -> LLMReply:
+    def chat(self, messages: list[dict], tools: list[dict] | None = None,
+             role: str | None = None, format_hint: str | None = None) -> LLMReply:
         key = self._session_key(messages)
         conv_id, n_sent = self._sessions.get(key, (None, 0))
         if n_sent > len(messages):          # stale identity reuse — start over
@@ -177,6 +165,14 @@ class CommotionProvider:
         delta = messages[n_sent:]
         text = "\n\n".join(self._render(m, tools if i + n_sent == 0 else None)
                            for i, m in enumerate(delta)) or "(continue)"
+        # tag only the FIRST message of a conversation; the worker routes on it
+        # and remembers the role for the rest of the conversation.
+        if role and n_sent == 0:
+            text = f"ROLE: {role}\n\n{text}"
+        # minimal per-message output-format reminder — this platform's models
+        # need the format restated in the message, not just the system prompt.
+        if format_hint:
+            text = f"{text}\n\n## RESPOND WITH (format)\n{format_hint}"
 
         data = self._post(text, conv_id)
         conv_id = data.get("conversationId") or conv_id
@@ -235,10 +231,12 @@ class FallbackProvider:
     def name(self):
         return self._chain[self._active].name
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None) -> LLMReply:
+    def chat(self, messages: list[dict], tools: list[dict] | None = None,
+             role: str | None = None, format_hint: str | None = None) -> LLMReply:
         while True:
             try:
-                return self._chain[self._active].chat(messages, tools)
+                return self._chain[self._active].chat(messages, tools, role,
+                                                      format_hint)
             except ProviderError as e:
                 if self._active + 1 >= len(self._chain):
                     raise
@@ -255,13 +253,18 @@ class FallbackProvider:
 # Factory — reads env, builds the configured chain (fresh per scenario turn)
 # ---------------------------------------------------------------------------
 def build_provider(on_switch=None):
-    """NETGUARD_LLM_PROVIDER: 'commotion,ollama' (primary,fallback), a single
-    name, or unset (auto: commotion+ollama if Commotion is configured, else
-    ollama)."""
+    """NETGUARD_LLM_PROVIDER: a single provider name (default 'commotion'), or a
+    'primary,fallback' chain if you explicitly want a fallback. Default is
+    Commotion only — the worker owns the persona, so the app sends thin
+    (ROLE + data) messages that assume a persona-configured worker.
+
+    NOTE: the thin-message mode is Commotion-specific. If you set 'ollama'
+    here, the app would send it no behavioral instructions and it would fail —
+    Ollama would need the full prompts restored. Kept only as an escape hatch.
+    """
     spec = os.environ.get("NETGUARD_LLM_PROVIDER", "").strip().lower()
     if not spec:
-        spec = ("commotion,ollama"
-                if os.environ.get("COMMOTION_API_KEY") else "ollama")
+        spec = "commotion" if os.environ.get("COMMOTION_API_KEY") else "ollama"
 
     def make(name: str):
         if name == "commotion":

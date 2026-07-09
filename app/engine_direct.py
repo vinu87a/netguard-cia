@@ -30,12 +30,13 @@ from pybatfish.client.session import Session
 from pybatfish.datamodel.primitives import Interface
 
 BATFISH_DIRECT_HOST = os.environ.get("BATFISH_DIRECT_HOST", "localhost")
-MAX_ROWS = 100  # cap dataframe rows returned to the LLM
+# No row cap — the worker has a large context window; return all rows.
+MAX_ROWS = None
 
 
-def _records(df, cap: int = MAX_ROWS) -> list[dict]:
+def _records(df, cap: int | None = MAX_ROWS) -> list[dict]:
     """DataFrame -> JSON-safe records (pybatfish cells hold rich objects)."""
-    recs = df.head(cap).to_dict(orient="records")
+    recs = (df if cap is None else df.head(cap)).to_dict(orient="records")
     return json.loads(json.dumps(recs, default=str))
 
 
@@ -131,7 +132,7 @@ class DirectEngine:
                 {"flow": str(r.get("Flow")),
                  "before": dispo(r.get("Reference_Traces")),
                  "after": dispo(r.get("Snapshot_Traces"))}
-                for r in df.head(MAX_ROWS).to_dict(orient="records")
+                for r in df.to_dict(orient="records")
             ],
         }
 
@@ -147,10 +148,10 @@ class DirectEngine:
         out: dict[str, Any] = {}
 
         df = bf.q.initIssues().answer().frame()
-        out["init_issues"] = {"count": int(len(df)), "rows": _records(df, 40)}
+        out["init_issues"] = {"count": int(len(df)), "rows": _records(df)}
 
         df = bf.q.undefinedReferences().answer().frame()
-        out["undefined_references"] = {"count": int(len(df)), "rows": _records(df, 40)}
+        out["undefined_references"] = {"count": int(len(df)), "rows": _records(df)}
 
         # duplicate primary IPs across devices (e.g. cloned loopbacks)
         df = bf.q.interfaceProperties(properties="Primary_Address").answer().frame()
@@ -158,7 +159,7 @@ class DirectEngine:
         dupes = df[df.duplicated(subset=["Primary_Address"], keep=False)]
         out["duplicate_interface_ips"] = {
             "count": int(len(dupes)),
-            "rows": _records(dupes.sort_values("Primary_Address"), 40),
+            "rows": _records(dupes.sort_values("Primary_Address")),
         }
 
         sessions = self.bgp_sessions(network, snapshot)

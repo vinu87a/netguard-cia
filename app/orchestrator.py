@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from engine_direct import DirectEngine
 from llm_provider import build_provider
 from mcp_client import BatfishOps, MCPToolError
-from ui_helpers import FRIENDLY_CHECK
+from ui_helpers import (FRIENDLY_CHECK, split_findings_verdict,
+                        strip_internal_terms)
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_DIR / "prompts"
@@ -37,11 +39,44 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# LLM backend selection lives in llm_provider.py (NETGUARD_LLM_PROVIDER env:
-# e.g. "commotion,ollama" = Commotion primary with Ollama fallback).
+# LLM backend selection lives in llm_provider.py. Default is Commotion only
+# (no fallback). The worker owns all behavioral instructions; the app sends
+# only ROLE + data + (for the translator) the machine-generated check catalog.
 
-MAX_RESULT_CHARS = 20_000  # cap a single tool result fed back to the LLM
-MAX_TRANSLATOR_ITERATIONS = 12
+# No context caps — the worker has a large context window, so tool results and
+# the synthesizer payload are sent in full. Only a loop backstop remains, to
+# prevent a runaway tool-calling loop (not a context limit).
+MAX_TRANSLATOR_ITERATIONS = 40
+# Verify -> remediate -> re-verify: how many times the verifier may send the
+# translator back for missing checks before the verdict proceeds with a floor.
+MAX_VERIFY_CYCLES = 5
+
+# Minimal per-message output-format reminders. The domain rules live in the
+# worker/sub-agent prompts; these only restate the OUTPUT SHAPE, which this
+# platform's models won't reliably honor from the system prompt alone.
+_TRANSLATOR_FORMAT = (
+    'To run a check, reply with EXACTLY ONE JSON object and nothing else:\n'
+    '{"tool": "<check name from AVAILABLE CHECKS>", "args": { ...exactly the '
+    'keys in that check\'s schema... }}\n'
+    'Use the schema\'s argument keys verbatim (e.g. apply_failure_set takes '
+    '"node_failures" and "interface_failures" arrays of strings; interfaces '
+    'as "node[Interface]"). One check per reply. When the investigation is '
+    'complete, reply in plain text beginning with the line: READY FOR SYNTHESIS'
+)
+_VERIFIER_FORMAT = (
+    'Reply with EXACTLY ONE JSON object and nothing else:\n'
+    '{"complete": true|false, "missing_probes": [...], "concerns": [...], '
+    '"recommended_floor": "GO"|"GO-WITH-CONDITIONS"|"NO-GO"|'
+    '"INSUFFICIENT-DATA"|null}'
+)
+_SYNTHESIZER_FORMAT = (
+    'Output two zones. First a line "FINDINGS" then one bullet per check tagged '
+    '[verified]. Then a line beginning "VERDICT:" followed by <GO|'
+    'GO-WITH-CONDITIONS|NO-GO|INSUFFICIENT-DATA> and these headers each on their '
+    'own line: CONFIDENCE:, IMPACTED SERVICES / COMPONENTS:, PACKET-FLOW:, '
+    'REASONING:, CONDITIONS:, ROLLBACK:, RESIDUAL-UNKNOWNS:. Plain language '
+    'only — no internal check names, no "Batfish", no snapshot IDs.'
+)
 
 
 def _openai_tools() -> list[dict]:
@@ -464,13 +499,68 @@ TRANSLATOR_TOOLS = [
 
 
 def _truncate(obj) -> str:
-    s = obj if isinstance(obj, str) else json.dumps(obj, default=str)
-    if len(s) > MAX_RESULT_CHARS:
-        s = s[:MAX_RESULT_CHARS] + f'... [truncated, {len(s)} chars total]'
-    return s
+    # No cap — the worker has a large context window; return results in full.
+    return obj if isinstance(obj, str) else json.dumps(obj, default=str)
 
 
 _ENGINE = DirectEngine()
+
+_IFACE_RE = re.compile(r"^(\S+?)[\s\[]+(.+?)\]?$")
+
+
+def _normalize_iface(spec: str) -> str:
+    """Accept 'node[Iface]' or the looser 'node Iface' some models emit and
+    return the canonical 'node[Iface]' the engine expects."""
+    spec = spec.strip()
+    if "[" in spec and spec.endswith("]"):
+        return spec
+    m = _IFACE_RE.match(spec)
+    return f"{m.group(1)}[{m.group(2).strip()}]" if m else spec
+
+
+def _coerce_failure_args(args: dict) -> dict:
+    """Tolerate the loose failure-set arg shapes these models emit and coerce to
+    {node_failures, interface_failures}. Handles the schema shape plus common
+    variants: a `failures`/`failure_set` list of {type,node,interface} objects
+    or "node[iface]" strings, and singular target/node/interface keys."""
+    nf = list(args.get("node_failures") or [])
+    ifc = list(args.get("interface_failures") or [])
+
+    def add(item):
+        if isinstance(item, str):
+            (ifc if "[" in item or " " in item.strip() else nf).append(item)
+        elif isinstance(item, dict):
+            node = item.get("node") or item.get("hostname") or item.get("device")
+            iface = item.get("interface") or item.get("iface")
+            typ = str(item.get("type", "")).lower()
+            if iface and node:
+                ifc.append(f"{node}[{iface}]")
+            elif node and ("node" in typ or typ in ("", "node_down", "node")):
+                nf.append(node)
+            elif node:
+                nf.append(node)
+
+    for key in ("failures", "failure_set", "targets", "items"):
+        v = args.get(key)
+        if isinstance(v, list):
+            for it in v:
+                add(it)
+        elif isinstance(v, (str, dict)):
+            add(v)
+    # singular convenience keys — a split node+interface is ONE interface
+    # failure, not also a standalone node failure.
+    if args.get("interface"):
+        n = args.get("node") or args.get("hostname") or args.get("device") or ""
+        ifc.append(f"{n}[{args['interface']}]" if n else args["interface"])
+    else:
+        for k in ("target", "node", "device", "hostname"):
+            if args.get(k):
+                add(args[k])
+
+    out = dict(args)
+    out["node_failures"] = nf
+    out["interface_failures"] = ifc
+    return out
 
 
 def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
@@ -482,6 +572,7 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
 
     # ---- direct-engine tools (pybatfish) ----------------------------------
     if name == "apply_failure_set":
+        args = _coerce_failure_args(args)
         if args.get("reset"):
             ledger.node_failures = []
             ledger.interface_failures = []
@@ -489,6 +580,7 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
             if n not in ledger.node_failures:
                 ledger.node_failures.append(n)
         for i in args.get("interface_failures") or []:
+            i = _normalize_iface(i)
             if i not in ledger.interface_failures:
                 ledger.interface_failures.append(i)
         if not (ledger.node_failures or ledger.interface_failures):
@@ -597,82 +689,44 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
 # --------------------------------------------------------------------------
 # Scenario turn (docs/02): translate -> compute -> synthesize
 # --------------------------------------------------------------------------
-def _load_prompt(name: str) -> str:
-    return (PROMPTS_DIR / name).read_text()
+# The worker owns all behavioral instructions (persona + domain rules + output
+# formats + vendor reference) in its system prompt. The app sends only DATA:
+# the ledger, the device inventory, the check catalog, the question, and the
+# results. See Misc/docs/08 for the worker system prompt.
 
-
-def _translator_system(ledger: Ledger) -> str:
-    base = _load_prompt("translator_system_prompt.md")
-    addendum = f"""
-
-## Runtime facts (this deployment — override anything above that conflicts)
-
-- Tool names here are the REAL ones. `check_routing` returns protocol process
-  presence ONLY — for session claims use `bgp_session_status`; for selected
-  routes use `routes_to`; for reachability use traceroute / simulate_traffic /
-  failure_impact / bidirectional tools.
-- FAILURES (single or stacked): your FIRST tool call MUST be
-  `apply_failure_set` whenever the user fails/shuts anything — it is the only
-  action that records the failure in the session ledger and creates the failed
-  snapshot your probes run against. Probing reachability without having
-  applied the failure answers the WRONG question. "Now also fail X" = call it
-  again with just X (the set persists). batfish_failure_impact is optional
-  extra evidence only. Reserve stage_change_snapshot for policy/config EDITS;
-  edits and the failure set compose automatically.
-- DIFFS: `differential_reachability` is the authoritative "what did this
-  change break" — run it (after=current, before=previous or base) for every
-  change scenario, then confirm the specific service flow with traceroute.
-- Before concluding GO on any change, run `detect_loops` on the changed
-  snapshot.
-- stage_change_snapshot applies edits and advances the ledger automatically.
-  Call read_config first; supply full new file text; echo the exact delta in
-  edit_summary.
-- VANTAGE POINTS: after failing a link/interface on device X, do NOT judge
-  reachability only from X itself — its local view is often the outlier. Probe
-  from at least one interior device behind it (e.g. a core router) too. If
-  failure_impact says NO_IMPACT but a single traceroute says NO_ROUTE, that is
-  a vantage-point conflict: run more traceroutes from other sources before
-  handing to synthesis, and report the per-source results.
-- When your investigation is complete, STOP calling tools and write the single
-  line `READY FOR SYNTHESIS` followed by a one-paragraph note on which tool
-  results matter and what diff comparisons you made. Do NOT write the verdict.
-- If the scenario is ambiguous, ask ONE clarifying question (no tools). If a
-  required device/peer is missing from the model, say INSUFFICIENT-DATA and
-  name the gap.
-
-## Current ledger
-{json.dumps(ledger.to_public_dict(), indent=1)}
-
-## Device inventory (from snapshot_info)
-{ledger.device_summary[:6000]}
-"""
-    return base + addendum
-
-
-def _synthesizer_system() -> str:
+def _translator_context(ledger: Ledger) -> str:
+    """DATA the translator needs — session state + device inventory (no
+    behavioral instructions; those live in the worker prompt)."""
     return (
-        _load_prompt("synthesizer_system_prompt.md")
-        + "\n\n# Vendor reference (for [vendor-doc] tagged steps)\n\n"
-        + _load_prompt("vendor_reference.md")
-        + "\n\n## Runtime caveats\n"
-          "1. bgp_session_status results ARE verified facts about session "
-          "establishment (as modeled from configs) — cite them as [verified] "
-          "and call the check 'BGP session check' in your output. LIVE session "
-          "state at deployment time still belongs in RESIDUAL-UNKNOWNS. "
-          "differential_reachability results are the authoritative "
-          "before/after comparison of what a change broke; detect_loops backs "
-          "any loop/no-loop claim. check_routing remains process-presence "
-          "only.\n"
-          "2. CONFLICT RULE (binding): failure_impact diffs the FULL flow matrix — "
-          "NO_IMPACT means no flow that worked before stopped working. If "
-          "failure_impact says NO_IMPACT but a reachability probe from a SINGLE "
-          "source says NO_ROUTE, the evidence conflicts and is incomplete: the "
-          "single source is usually the modified device itself, whose local view "
-          "is the outlier. In that case you MUST NOT issue NO-GO (or GO) from the "
-          "single-source probe — the verdict floor is INSUFFICIENT-DATA, naming "
-          "the missing probes (same destination from other source devices). Only "
-          "multi-source agreement upgrades the verdict."
+        "## Current session state (ledger)\n"
+        f"{json.dumps(ledger.to_public_dict(), indent=1)}\n\n"
+        "## Device inventory (nodes / interfaces / vendors)\n"
+        f"{ledger.device_summary}"
     )
+
+
+def _run_verifier(provider, ledger: Ledger, user_text: str, engine_facts: str,
+                  notify) -> dict | None:
+    """Independent completeness/soundness review. Returns the parsed JSON dict,
+    or None if the verifier could not be run or parsed (never fatal — the
+    deterministic guards are the hard floor)."""
+    notify("Verifying investigation")
+    data = (f"## USER QUESTION\n{user_text}\n\n## SESSION STATE\n"
+            f"{json.dumps(ledger.to_public_dict())}\n\n"
+            f"## CHECKS RUN AND RESULTS\n{engine_facts}")
+    try:
+        reply = provider.chat([{"role": "user", "content": data}], role="VERIFIER", format_hint=_VERIFIER_FORMAT)
+    except Exception:
+        return None
+    text = reply.content.strip()
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) and "complete" in obj else None
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 _CHANGE_TOOLS = {"apply_failure_set", "stage_change_snapshot"}
@@ -696,6 +750,36 @@ class ScenarioResult:
     clarification: str | None = None   # set when the translator asked a question
 
 
+def _translator_rounds(provider, ops: BatfishOps, ledger: Ledger,
+                       messages: list[dict], tool_log: list[dict],
+                       notify) -> str:
+    """Run the translator tool-loop until it stops requesting checks. Mutates
+    `messages` and `tool_log` in place; returns the final plain-text reply."""
+    for _ in range(MAX_TRANSLATOR_ITERATIONS):
+        reply = provider.chat(messages, tools=_openai_tools(),
+                              role="TRANSLATOR", format_hint=_TRANSLATOR_FORMAT)
+        if not reply.tool_calls:
+            return reply.content
+        messages.append({
+            "role": "assistant", "content": reply.content,
+            "tool_calls": [{"id": tc.id, "type": "function",
+                             "function": {"name": tc.name,
+                                          "arguments": json.dumps(tc.arguments)}}
+                            for tc in reply.tool_calls]})
+        for tc in reply.tool_calls:
+            notify(f"Running: {FRIENDLY_CHECK.get(tc.name, tc.name.replace('_', ' '))}")
+            try:
+                out = _execute_translator_tool(ops, ledger, tc.name, tc.arguments)
+                is_error = out.startswith("ERROR")
+            except MCPToolError as e:
+                out, is_error = f"ERROR: {e}", True
+            tool_log.append({"tool": tc.name, "input": tc.arguments,
+                             "result": out, "is_error": is_error})
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": out})
+    return ""
+
+
 def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
                       chat_history: list[dict] | None = None,
                       progress=None) -> ScenarioResult:
@@ -704,89 +788,92 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # fresh provider per turn -> fallback stickiness resets each turn
     provider = build_provider(on_switch=notify)
 
-    # ---- translator loop -------------------------------------------------
+    # ---- translator investigation ---------------------------------------
     messages = (
-        [{"role": "system", "content": _translator_system(ledger)}]
+        [{"role": "system", "content": _translator_context(ledger)}]
         + list(chat_history or [])
         + [{"role": "user", "content": user_text}]
     )
     tool_log: list[dict] = []
-    final_text = ""
+    final_text = _translator_rounds(provider, ops, ledger, messages, tool_log,
+                                    notify)
 
-    nudged = False
-    for _ in range(MAX_TRANSLATOR_ITERATIONS):
-        reply = provider.chat(messages, tools=_openai_tools())
-        if not reply.tool_calls:
-            # Deterministic completeness guard: don't accept "done" on a
-            # change scenario with zero reachability probes in the log.
-            if tool_log and _needs_probe_nudge(tool_log) and not nudged:
-                nudged = True
-                notify("Investigation incomplete — asking for probes")
-                messages.append({"role": "assistant", "content": reply.content})
-                messages.append({"role": "user", "content": (
-                    "COMPLETENESS CHECK FAILED: you applied a change/failure "
-                    "but ran no reachability probe to confirm the specific "
-                    "service flow the user asked about. Continue now: run "
-                    "network_traceroute for the user's flow from an interior "
-                    "device (and differential_reachability + detect_loops if "
-                    "not already run). Then finish.")})
-                continue
-            final_text = reply.content
-            break  # translator finished (READY FOR SYNTHESIS) or asked a question
-
-        messages.append({
-            "role": "assistant",
-            "content": reply.content,
-            "tool_calls": [{"id": tc.id, "type": "function",
-                             "function": {"name": tc.name,
-                                          "arguments": json.dumps(tc.arguments)}}
-                            for tc in reply.tool_calls],
-        })
-        for tc in reply.tool_calls:
-            name = tc.name
-            notify(f"Running: {FRIENDLY_CHECK.get(name, name.replace('_', ' '))}")
-            try:
-                out = _execute_translator_tool(ops, ledger, name, tc.arguments)
-                is_error = out.startswith("ERROR")
-            except MCPToolError as e:
-                out, is_error = f"ERROR: {e}", True
-            tool_log.append({"tool": name, "input": tc.arguments,
-                             "result": out, "is_error": is_error})
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": out})
+    # Deterministic completeness guard (pre-verifier, one-shot): a change/failure
+    # was applied but no reachability probe confirmed the specific flow.
+    if tool_log and _needs_probe_nudge(tool_log):
+        notify("Investigation incomplete — asking for probes")
+        messages.append({"role": "user", "content": (
+            "COMPLETENESS CHECK FAILED: you applied a change/failure but ran no "
+            "reachability probe to confirm the specific service flow the user "
+            "asked about. Run network_traceroute for that flow from an interior "
+            "device (and differential_reachability + detect_loops if not already "
+            "run). Then reply READY FOR SYNTHESIS.")})
+        final_text = _translator_rounds(provider, ops, ledger, messages,
+                                        tool_log, notify) or final_text
 
     # Ambiguity / insufficient-data path: no tools were run at all.
     if not tool_log and "READY FOR SYNTHESIS" not in final_text:
         return ScenarioResult("", "", tool_log, clarification=final_text or
                               "I couldn't classify that scenario — can you rephrase?")
 
+    # ---- bounded verify -> remediate -> re-verify loop -------------------
+    # The verifier is an adversarial second opinion. When it reports gaps, feed
+    # the missing checks back to the translator and verify again — up to
+    # MAX_VERIFY_CYCLES times. If still incomplete, proceed with the verifier's
+    # recommended_floor (typically INSUFFICIENT-DATA). Deterministic guards
+    # remain the hard floor underneath this.
+    verifier_notes = None
+    for cycle in range(MAX_VERIFY_CYCLES + 1):
+        engine_facts = json.dumps(tool_log, indent=1, default=str)
+        verifier_notes = _run_verifier(provider, ledger, user_text,
+                                       engine_facts, notify)
+        missing = (verifier_notes or {}).get("missing_probes")
+        if not verifier_notes or not missing:
+            break  # verifier satisfied (or unavailable) — done
+        if cycle >= MAX_VERIFY_CYCLES:
+            notify("Verifier still flags gaps after "
+                   f"{MAX_VERIFY_CYCLES} cycles — proceeding with a capped verdict")
+            break
+        notify(f"Verifier flagged gaps (cycle {cycle + 1}/{MAX_VERIFY_CYCLES}) "
+               "— gathering more evidence")
+        messages.append({"role": "user", "content": (
+            "VERIFIER found the investigation incomplete. Missing: "
+            + json.dumps(missing) + ". Run exactly these checks now (e.g. "
+            "traceroute from an interior device, differential_reachability, "
+            "detect_loops as applicable), then reply READY FOR SYNTHESIS.")})
+        _translator_rounds(provider, ops, ledger, messages, tool_log, notify)
+
+    engine_facts = json.dumps(tool_log, indent=1, default=str)
+
     # ---- synthesizer -----------------------------------------------------
     notify("Synthesizing verdict")
-    engine_facts = json.dumps(tool_log, indent=1, default=str)
-    if len(engine_facts) > 150_000:
-        engine_facts = engine_facts[:150_000] + "\n... [tool log truncated]"
 
-    synth_user = f"""SCENARIO (user's words): {user_text}
+    floor = ""
+    if verifier_notes and verifier_notes.get("recommended_floor"):
+        floor = ("\nVERIFIER FLOOR: an independent review recommends the verdict "
+                 f"be no better than {verifier_notes['recommended_floor']} — do "
+                 "not exceed it unless the results clearly refute the concern.\n")
 
-LEDGER: {json.dumps(ledger.to_public_dict())}
+    synth_user = f"""## SCENARIO (user's words)
+{user_text}
 
-TRANSLATOR NOTE: {final_text or '(none)'}
+## SESSION STATE
+{json.dumps(ledger.to_public_dict())}
 
-STRUCTURED TOOL RESULTS (the ONLY source of engine facts):
+## TRANSLATOR NOTE
+{final_text or '(none)'}
+
+## VERIFIER NOTES
+{json.dumps(verifier_notes) if verifier_notes else '(none)'}
+{floor}
+## STRUCTURED CHECK RESULTS (the ONLY source of facts)
 {engine_facts}
 """
-    synth = provider.chat([
-        {"role": "system", "content": _synthesizer_system()},
-        {"role": "user", "content": synth_user},
-    ])
-    answer = synth.content
-
-    # Split the two zones on the VERDICT line (docs/05)
-    idx = answer.find("VERDICT:")
-    if idx > 0:
-        findings, verdict = answer[:idx].strip(), answer[idx:].strip()
-    else:
-        findings, verdict = "", answer.strip()
+    synth = provider.chat([{"role": "user", "content": synth_user}],
+                          role="SYNTHESIZER",
+                          format_hint=_SYNTHESIZER_FORMAT)
+    # robust two-zone split (tolerant of markdown headers) + plain-language net
+    findings, verdict = split_findings_verdict(strip_internal_terms(synth.content))
     return ScenarioResult(findings, verdict, tool_log)
 
 

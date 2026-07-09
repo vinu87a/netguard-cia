@@ -15,10 +15,17 @@ _VERDICT_FIELDS = [
     "VERDICT", "CONFIDENCE", "IMPACTED SERVICES / COMPONENTS", "PACKET-FLOW",
     "REASONING", "CONDITIONS", "ROLLBACK", "RESIDUAL-UNKNOWNS",
 ]
+# Tolerant matchers: capable models decorate the output (## headers, **bold**,
+# the field value on the next line) — accept all of it rather than fighting for
+# byte-exact headers. Leading markdown/space, field name, OPTIONAL colon.
+_MD_PREFIX = r"[#>*_\s-]*"
 _FIELD_RE = re.compile(
-    r"^\W*(" + "|".join(re.escape(f) for f in _VERDICT_FIELDS) + r")\W*:\s*(.*)$",
+    r"^" + _MD_PREFIX + r"(" + "|".join(re.escape(f) for f in _VERDICT_FIELDS)
+    + r")\s*:?\s*(.*)$",
     re.IGNORECASE,
 )
+_VERDICT_HEADER_RE = re.compile(r"^" + _MD_PREFIX + r"VERDICT\b\s*:?",
+                                re.IGNORECASE | re.MULTILINE)
 
 
 def _clean(text: str) -> str:
@@ -27,9 +34,36 @@ def _clean(text: str) -> str:
     return text.strip().strip("—-– ").strip()
 
 
+def split_findings_verdict(answer: str) -> tuple[str, str]:
+    """Split the two-zone answer into (findings, verdict). Robust to markdown
+    headers and to the verdict header having no colon (e.g. '## VERDICT')."""
+    m = _VERDICT_HEADER_RE.search(answer)
+    if not m:
+        return "", answer.strip()
+    findings = answer[:m.start()].strip()
+    verdict = answer[m.start():].strip()
+    # drop a leading 'FINDINGS' header from the findings zone for cleanliness
+    findings = re.sub(r"^" + _MD_PREFIX + r"FINDINGS\b\s*:?\s*", "", findings,
+                      flags=re.IGNORECASE).strip()
+    return findings, verdict
+
+
+def strip_internal_terms(text: str) -> str:
+    """Safety net for plain language: replace internal identifiers the
+    synthesizer should not emit with friendly names. The sub-agent prompt is
+    the primary control; this catches leaks."""
+    if not text:
+        return text
+    for internal, friendly in FRIENDLY_CHECK.items():
+        text = re.sub(rf"\b{re.escape(internal)}\b", friendly, text)
+    text = re.sub(r"\bBatfish\b", "the analyzer", text)
+    return text
+
+
 def parse_verdict(verdict_text: str) -> dict[str, str]:
     """Split the synthesizer's VERDICT zone into {field: text}. Tolerant of
-    markdown decoration; multi-line values run until the next field marker."""
+    markdown decoration and of a header line whose value sits on the following
+    line(s); multi-line values run until the next field marker."""
     fields: dict[str, str] = {}
     current: str | None = None
     # models emit unicode hyphens (non-breaking U+2011, en/em dashes) inside
