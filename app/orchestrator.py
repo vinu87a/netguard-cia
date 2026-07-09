@@ -726,6 +726,20 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "multipath_consistency",
+        "description": (
+            "Check equal-cost multipath (ECMP) consistency across the network: "
+            "flows whose parallel paths disagree on delivery (some accepted, "
+            "some dropped) — asymmetric forwarding that intermittently breaks "
+            "traffic. Run before a GO when a change could alter path diversity. "
+            "Empty is clean."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"snapshot": _snapshot_prop()},
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -982,6 +996,8 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
             net, snap, nodes=_normalize_node_spec(args.get("nodes"))))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))
+    if name == "multipath_consistency":
+        return _truncate(_ENGINE.multipath_consistency(net, snap))
     if name == "health_checks":
         return _truncate(_ENGINE.health_checks(net, snap))
     if name == "routes_to":

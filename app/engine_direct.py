@@ -366,7 +366,25 @@ class DirectEngine:
         out["bgp_sessions"] = sessions
 
         out["forwarding_loops"] = self.detect_loops(network, snapshot)
+
+        # config hygiene: dead structures + parse warnings
+        df = bf.q.unusedStructures().answer().frame()
+        out["unused_structures"] = {"count": int(len(df)), "rows": _records(df)}
+        df = bf.q.parseWarning().answer().frame()
+        out["parse_warnings"] = {"count": int(len(df)), "rows": _records(df)}
         return out
+
+    # -- forwarding integrity: ECMP / multipath consistency ---------------------
+    def multipath_consistency(self, network: str, snapshot: str) -> dict:
+        """Flows whose equal-cost multipath disagree — some copies delivered,
+        others dropped (asymmetric/inconsistent forwarding, a real outage
+        cause). Empty is clean."""
+        bf = self._session(network, snapshot)
+        df = bf.q.subnetMultipathConsistency().answer().frame()
+        return {"inconsistent_count": int(len(df)),
+                "note": ("flows whose ECMP paths disagree on delivery; empty "
+                         "means all multipath is consistent"),
+                "inconsistent_flows": _records(df)}
 
     # -- route policies (route-map / policy-statement analysis) -----------------
     @staticmethod

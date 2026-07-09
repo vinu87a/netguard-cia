@@ -153,6 +153,7 @@ FRIENDLY_CHECK = {
     "ospf_compatibility": "OSPF compatibility check",
     "ospf_edges": "OSPF adjacencies",
     "ospf_process_config": "OSPF process check",
+    "multipath_consistency": "ECMP consistency check",
 }
 def _loads(result: str):
     try:
@@ -278,7 +279,13 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
                        f"undef refs {r.get('undefined_references', {}).get('count', '?')}, "
                        f"dup IPs {r.get('duplicate_interface_ips', {}).get('count', '?')}, "
                        f"bad BGP {len(r.get('bgp_sessions', {}).get('not_established', []))}, "
-                       f"loops {r.get('forwarding_loops', {}).get('loop_count', '?')}")
+                       f"loops {r.get('forwarding_loops', {}).get('loop_count', '?')}, "
+                       f"unused {r.get('unused_structures', {}).get('count', '?')}, "
+                       f"parse warns {r.get('parse_warnings', {}).get('count', '?')}")
+        elif tool == "multipath_consistency" and isinstance(r, dict):
+            target = "ECMP path consistency"
+            n = r.get("inconsistent_count", "?")
+            outcome = f"{n} inconsistent flows" + (" (clean)" if n == 0 else "")
         elif tool == "batfish_check_routing" and isinstance(r, dict):
             target = f"protocols {args.get('protocols')}"
             outcome = f"process check {r.get('overall', '?')}"
