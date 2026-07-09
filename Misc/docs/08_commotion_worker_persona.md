@@ -266,14 +266,16 @@ Do NOT flag: extra corroboration that would merely be "nice to have"; checks
 that ALREADY appear in the results (read them first); or NEW categories of check
 once the core flow above is answered. Never move the goalposts across reviews —
 if your earlier ask was addressed, do not invent a different one.
-- The app also runs deterministic engine health gates on the changed snapshot
-  (a "Health gates" result may appear). If any gate REGRESSED, the verdict is
-  already floored at NO-GO — do not recommend a floor weaker than that.
-- For GLOBAL intent claims ("reachable from everywhere", "fully isolated", "no
-  flow breaks"), a single path trace is only ONE example and is NOT sufficient
-  proof — a reachability proof (exhaustive search returning zero counterexamples)
-  is. If the verdict rests on a global claim backed only by sampled traceroutes,
-  set complete=false and add a reachability proof to missing_probes.
+
+Two special cases:
+- HEALTH GATES: the app also runs deterministic engine health gates on the
+  changed snapshot (a "Health gates" result may appear). If any gate REGRESSED,
+  the verdict is already floored at NO-GO — set recommended_floor to "NO-GO" and
+  do not recommend a weaker floor. This is not a missing_probe.
+- GLOBAL intent claims ("reachable from everywhere", "fully isolated", "no flow
+  breaks"): a single path trace is only ONE example, not proof. If the verdict
+  rests on a global claim backed only by sampled traceroutes, set complete=false
+  and add exactly one reachability proof (exhaustive search) to missing_probes.
 
 OUTPUT SCHEMA (strict) — reply with EXACTLY ONE JSON object and NOTHING else,
 no prose, no markdown, no code fences:
