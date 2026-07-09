@@ -142,6 +142,10 @@ FRIENDLY_CHECK = {
     "differential_query": "Before/after diff",
     "test_route_policy": "Route-policy test",
     "search_route_policy": "Route-policy search",
+    "test_filter": "ACL flow test",
+    "search_filter": "ACL flow search",
+    "compare_filters": "ACL before/after",
+    "filter_line_reachability": "ACL dead-line check",
 }
 def _loads(result: str):
     try:
@@ -217,6 +221,24 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
             n = r.get("counterexample_count", "?")
             outcome = (f"{n} counterexamples"
                        + (" (intent holds)" if n == 0 else ""))
+        elif tool == "test_filter" and isinstance(r, dict):
+            h = args.get("headers", {})
+            target = f"{h.get('dstIps', 'any')}:{h.get('dstPorts', 'any')}/{h.get('ipProtocols', 'any')}"
+            actions = sorted({str(x.get("Action")) for x in (r.get("results") or [])})
+            outcome = (f"{r.get('result_count', 0)} filter results"
+                       + (f" | {', '.join(actions)}" if actions else ""))
+        elif tool == "search_filter" and isinstance(r, dict):
+            target = (f"action={args.get('action')}"
+                      + (" outside-space" if args.get("invert_search") else ""))
+            n = r.get("match_count", "?")
+            outcome = f"{n} matching flows" + (" (proof holds)" if n == 0 else "")
+        elif tool == "compare_filters" and isinstance(r, dict):
+            cmp_ = r.get("compared", {})
+            target = f"{cmp_.get('before')} vs {cmp_.get('after')}"
+            outcome = f"{r.get('changed_line_count', '?')} filter lines changed"
+        elif tool == "filter_line_reachability" and isinstance(r, dict):
+            target = "shadowed/dead ACL lines"
+            outcome = f"{r.get('unreachable_line_count', '?')} unreachable lines"
         elif tool == "routes_to" and isinstance(r, dict):
             target = f"RIB routes to {args.get('prefix')}"
             outcome = f"{r.get('route_count')} routes"

@@ -537,6 +537,88 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "test_filter",
+        "description": (
+            "Deterministically evaluate whether an ACL/filter PERMITs or DENYs a "
+            "SPECIFIC flow, returning the matched line. headers describe the flow "
+            "space: srcIps, dstIps (CIDR or IP), dstPorts, srcPorts, ipProtocols "
+            "(e.g. [\"tcp\"]), applications (e.g. [\"ssh\"]). Optionally scope with "
+            "filters (ACL name/regex) and nodes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "headers": {"type": "object",
+                             "description": "flow, e.g. {\"dstIps\": \"10.0.0.5\", "
+                             "\"dstPorts\": \"22\", \"ipProtocols\": [\"tcp\"]}"},
+                "filters": {"type": "string", "description": "optional ACL name/regex"},
+                "nodes": {"type": "string", "description": "optional node specifier"},
+                "start_location": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["headers"],
+        },
+    },
+    {
+        "name": "search_filter",
+        "description": (
+            "Search a filter's whole flow space for flows it treats with action "
+            "('permit'|'deny') — a proof, not a sample. Provably-safe ACL change "
+            "pattern: (1) search 'permit' for the intended traffic on base = "
+            "confirm it is NOT already allowed; (2) after the edit, search 'deny' "
+            "for the same traffic = EMPTY proves all intended flows now pass; "
+            "(3) set invert_search=true to search OUTSIDE the intended header "
+            "space for newly-permitted flows = the collateral-damage check."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "headers": {"type": "object", "description": "the intended flow space"},
+                "action": {"type": "string", "enum": ["permit", "deny"]},
+                "invert_search": {"type": "boolean",
+                                   "description": "search outside the header space"},
+                "filters": {"type": "string"},
+                "nodes": {"type": "string"},
+                "start_location": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["headers", "action"],
+        },
+    },
+    {
+        "name": "compare_filters",
+        "description": (
+            "Filter lines that treat some flow differently between the base and "
+            "the changed snapshot — the authoritative 'what did this ACL edit "
+            "change'. Empty means the edit altered no filter behavior."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reference_snapshot": {"type": "string",
+                                        "description": "before-snapshot (default base)"},
+                "filters": {"type": "string"},
+                "nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "filter_line_reachability",
+        "description": (
+            "Find ACL lines that can never match (shadowed/dead lines) — config "
+            "hygiene. Empty is clean."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filters": {"type": "string"},
+                "nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -739,6 +821,30 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
             input_constraints=args.get("input_constraints"),
             output_constraints=args.get("output_constraints"),
             policies=args.get("policies"),
+            nodes=_normalize_node_spec(args.get("nodes"))))
+    if name == "test_filter":
+        return _truncate(_ENGINE.test_filter(
+            net, snap, args["headers"], filters=args.get("filters"),
+            nodes=_normalize_node_spec(args.get("nodes")),
+            start_location=args.get("start_location")))
+    if name == "search_filter":
+        return _truncate(_ENGINE.search_filter(
+            net, snap, args["headers"], args["action"],
+            invert_search=bool(args.get("invert_search")),
+            filters=args.get("filters"),
+            nodes=_normalize_node_spec(args.get("nodes")),
+            start_location=args.get("start_location")))
+    if name == "compare_filters":
+        before = args.get("reference_snapshot") or ledger.base
+        if snap == before:
+            return ("ERROR: nothing to compare — current snapshot equals the "
+                    "reference; apply a config edit first")
+        return _truncate(_ENGINE.compare_filters(
+            net, before, snap, filters=args.get("filters"),
+            nodes=_normalize_node_spec(args.get("nodes"))))
+    if name == "filter_line_reachability":
+        return _truncate(_ENGINE.filter_line_reachability(
+            net, snap, filters=args.get("filters"),
             nodes=_normalize_node_spec(args.get("nodes"))))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))

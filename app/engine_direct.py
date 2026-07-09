@@ -35,6 +35,7 @@ from pybatfish.client.asserts import (
     assert_no_undefined_references,
     assert_no_unestablished_bgp_sessions,
 )
+from pybatfish.datamodel.flow import HeaderConstraints
 from pybatfish.datamodel.primitives import Interface
 from pybatfish.datamodel.route import BgpRoute, BgpRouteConstraints
 from pybatfish.exception import BatfishAssertException
@@ -337,6 +338,98 @@ class DirectEngine:
                          "takes the searched action; empty means no such route "
                          "exists in the constrained space (an exhaustive proof)"),
                 "counterexamples": _records(df)}
+
+    # -- filters / ACLs (provably-safe change analysis) -------------------------
+    @staticmethod
+    def _headers(spec: dict) -> HeaderConstraints:
+        """Build a HeaderConstraints (flow space) from a loose dict. Common keys:
+        srcIps, dstIps, srcPorts, dstPorts, ipProtocols, applications."""
+        return HeaderConstraints(
+            srcIps=spec.get("srcIps"),
+            dstIps=spec.get("dstIps"),
+            srcPorts=spec.get("srcPorts"),
+            dstPorts=spec.get("dstPorts"),
+            ipProtocols=spec.get("ipProtocols"),
+            applications=spec.get("applications"),
+        )
+
+    def test_filter(self, network: str, snapshot: str, headers: dict,
+                    filters: str | None = None, nodes: str | None = None,
+                    start_location: str | None = None) -> dict:
+        """Deterministically evaluate whether a filter/ACL PERMITs or DENYs a
+        specific flow (headers), returning the matched line per filter."""
+        bf = self._session(network, snapshot)
+        kwargs: dict[str, Any] = {"headers": self._headers(headers)}
+        if filters:
+            kwargs["filters"] = filters
+        if nodes:
+            kwargs["nodes"] = nodes
+        if start_location:
+            kwargs["startLocation"] = start_location
+        df = bf.q.testFilters(**kwargs).answer().frame()
+        return {"result_count": int(len(df)), "results": _records(df)}
+
+    def search_filter(self, network: str, snapshot: str, headers: dict,
+                      action: str, invert_search: bool = False,
+                      filters: str | None = None, nodes: str | None = None,
+                      start_location: str | None = None) -> dict:
+        """Search the flow space for flows a filter treats with `action`
+        ('permit'|'deny'). With invert_search=True, search OUTSIDE the given
+        header space (the collateral-damage check). Empty results under a
+        'deny' search of intended-permit traffic = every intended flow is
+        allowed (a proof)."""
+        bf = self._session(network, snapshot)
+        kwargs: dict[str, Any] = {"headers": self._headers(headers),
+                                  "action": action,
+                                  "invertSearch": invert_search}
+        if filters:
+            kwargs["filters"] = filters
+        if nodes:
+            kwargs["nodes"] = nodes
+        if start_location:
+            kwargs["startLocation"] = start_location
+        df = bf.q.searchFilters(**kwargs).answer().frame()
+        return {"action_searched": action, "invert_search": invert_search,
+                "match_count": int(len(df)),
+                "note": ("flows the filter treats with the searched action "
+                         "(invert_search searches OUTSIDE the header space); a "
+                         "counterexample-style result, empty = none exist"),
+                "matches": _records(df)}
+
+    def compare_filters(self, network: str, before: str, after: str,
+                        filters: str | None = None,
+                        nodes: str | None = None) -> dict:
+        """Filter lines that treat some flow differently between two snapshots —
+        the authoritative 'what did this ACL edit change'."""
+        bf = self._session(network)
+        kwargs: dict[str, Any] = {}
+        if filters:
+            kwargs["filters"] = filters
+        if nodes:
+            kwargs["nodes"] = nodes
+        df = (bf.q.compareFilters(**kwargs)
+              .answer(snapshot=after, reference_snapshot=before).frame())
+        return {"compared": {"before": before, "after": after},
+                "changed_line_count": int(len(df)),
+                "note": ("filter lines whose treatment of some flow differs "
+                         "between snapshots; empty = the edit changed no filter "
+                         "behavior"),
+                "changes": _records(df)}
+
+    def filter_line_reachability(self, network: str, snapshot: str,
+                                 filters: str | None = None,
+                                 nodes: str | None = None) -> dict:
+        """ACL lines that can never match (shadowed/dead lines) — hygiene."""
+        bf = self._session(network, snapshot)
+        kwargs: dict[str, Any] = {}
+        if filters:
+            kwargs["filters"] = filters
+        if nodes:
+            kwargs["nodes"] = nodes
+        df = bf.q.filterLineReachability(**kwargs).answer().frame()
+        return {"unreachable_line_count": int(len(df)),
+                "note": "ACL lines that never match (shadowed/dead); empty is clean",
+                "unreachable_lines": _records(df)}
 
     # -- topology edges (for the UI diagram) ---------------------------------------
     def layer3_edges(self, network: str, snapshot: str) -> list[dict]:
