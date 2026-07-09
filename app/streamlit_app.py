@@ -144,9 +144,14 @@ def render_ledger(ledger: Ledger) -> None:
         st.markdown("**Change history:** none")
 
 
-def render_answer(result) -> str:
-    """Render one scenario answer (verdict table, facts, prose, topology).
-    Returns markdown to persist in chat history."""
+def render_answer(result, topo=None, live=True) -> tuple[str, dict | None]:
+    """Render one scenario answer (verdict table, facts, prose, topology) with
+    full Streamlit formatting. Returns (markdown, topo_snapshot). Called live for
+    the current turn AND on every rerun to re-render history richly (Streamlit
+    replays the whole script, so past turns must be re-rendered from their stored
+    `result`, not flattened to markdown). `live=False` replays a past turn: it
+    reuses the stored `topo` snapshot instead of re-querying the engine (which
+    would be slow and reflect the CURRENT, not that turn's, network state)."""
     parts: list[str] = []
 
     is_query = getattr(result, "mode", "change") == "query"
@@ -192,14 +197,24 @@ def render_answer(result) -> str:
     st.markdown(result.verdict)
     parts.append(f"**{zone_label.capitalize()}**\n\n{result.verdict}")
 
-    # before/after topology when the scenario changed the network
+    # before/after topology when the scenario changed the network. On the live
+    # turn we query the engine once and snapshot the edges; on replay we reuse
+    # that snapshot so the diagram matches THAT turn (not the current ledger).
+    topo_out = topo
     ledger = st.session_state.ledger
-    if ledger.current != ledger.base and st.session_state.base_edges is not None:
+    if live and ledger.current != ledger.base and st.session_state.base_edges is not None:
         try:
-            cur_edges = get_engine().layer3_edges(ledger.network, ledger.current)
+            topo_out = {"cur_edges": get_engine().layer3_edges(
+                            ledger.network, ledger.current),
+                        "failed_nodes": list(ledger.node_failures)}
+        except Exception as e:
+            st.caption(f"(topology diagram unavailable: {e})")
+            topo_out = None
+    if topo_out and st.session_state.base_edges is not None:
+        try:
             before, after = before_after_figures(
-                st.session_state.base_edges, cur_edges,
-                failed_nodes=ledger.node_failures,
+                st.session_state.base_edges, topo_out["cur_edges"],
+                failed_nodes=topo_out.get("failed_nodes"),
                 device_types=st.session_state.get("device_types"))
             st.markdown("#### Topology — before vs after")
             c1, c2 = st.columns(2)
@@ -219,7 +234,7 @@ def render_answer(result) -> str:
             st.json({"input": entry["input"]})
             st.text(entry["result"][:2000])
 
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), topo_out
 
 
 # --- sidebar ----------------------------------------------------------------
@@ -282,7 +297,12 @@ elif st.session_state.base_edges:
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+        # re-render past assistant answers with full formatting (banner, tables,
+        # topology) from their stored result — plain markdown would flatten them
+        if m["role"] == "assistant" and m.get("result") is not None:
+            render_answer(m["result"], topo=m.get("topo"), live=False)
+        else:
+            st.markdown(m["content"])
 
 prompt = st.chat_input("e.g. What breaks if I shut the AS1–AS3 link?",
                        disabled=not st.session_state.snapshot_ready)
@@ -306,11 +326,13 @@ if prompt:
 
         if result.clarification:
             st.markdown(result.clarification)
-            rendered = result.clarification
+            msg = {"role": "assistant", "content": result.clarification}
         else:
-            rendered = render_answer(result)
+            rendered, topo = render_answer(result)
+            msg = {"role": "assistant", "content": rendered,
+                   "result": result, "topo": topo}
 
-    st.session_state.messages.append({"role": "assistant", "content": rendered})
+    st.session_state.messages.append(msg)
 
 
 # --- sidebar: session state + reset (rendered LAST -> shows post-turn state) --
