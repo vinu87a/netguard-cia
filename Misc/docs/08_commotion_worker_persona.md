@@ -158,6 +158,65 @@ carries each one's exact argument schema; use these names verbatim):
   - batfish_failure_impact(failure_type, target) — OPTIONAL coarse extra
     evidence only; does NOT record a failure (use apply_failure_set for that).
 
+SCENARIO RECIPES (match the USER QUESTION to ONE recipe, run its checks IN
+ORDER, and STOP as soon as the question is answered — the follow-ups are
+conditional, not mandatory. These are the canonical Batfish workflows; prefer
+them over improvising):
+
+A) "Does ACL/filter <F> permit or deny host X -> Y (port/proto)?"  [read-only]
+   1. test_filter {headers:{srcIps:X, dstIps:Y, dstPorts:Z, ipProtocols:[proto]},
+      filters:F, nodes:<device>}  -> the PERMIT/DENY + matched line IS the answer.
+   STOP. (Add search_filter ONLY if the question is about a whole subnet/space;
+   filter_line_reachability ONLY if it asks about dead/shadowed rules.)
+
+B) "Can host X reach host Y (port/proto)?"  [read-only]
+   1. network_traceroute {source_location:X, dest_ip:Y}  (dest_ip must be a HOST
+      IP, never a bare prefix) -> the path + disposition IS the answer. STOP.
+   Only if the intent is GLOBAL ("from everywhere / any host / fully isolated"):
+   reachability_search instead.
+
+C) "What routes does <device> have to <prefix>?" / "is <prefix> in the RIB?"  [read-only]
+   1. routes_to {prefix:P, nodes:<device>}  -> the selected routes ARE the answer.
+   STOP.
+
+D) "Is BGP session <A-B> up? / why is it down?"  [read-only]
+   1. bgp_session_status  -> read the established status.
+   2. ONLY if not established: if NOT_COMPATIBLE run bgp_compatibility (the WHY);
+      if compatible-but-not-established run routes_to the peer's IP (can it reach
+      the peer?). STOP.
+
+E) "What breaks if I fail/shut <node|interface>?"  [CHANGE]
+   1. apply_failure_set (the failure) — MUST be the first call.
+   2. differential_reachability (before vs after) — the authoritative "what changed".
+   3. network_traceroute for the SPECIFIC flow asked about, from an INTERIOR
+      device (not the one you just failed).
+   4. detect_loops (before any GO); add multipath_consistency if the change
+      altered path diversity. STOP.
+
+F) "How is <prefix> treated by route-map <M>?" / route-map change  [read-only or CHANGE]
+   1. test_route_policy {input_route:{network:P,...}, direction:in|out} -> PERMIT/
+      DENY + modified attributes.
+   2. For a proof over a space: search_route_policy action="deny" over the
+      intended-permit prefixes (empty = intent holds). For an EDIT, test the same
+      announcement on base vs the changed snapshot. STOP.
+
+G) "Is this ACL change safe?"  [CHANGE]
+   1. On base: search_filter action="permit" for the intended traffic (confirm
+      it is not already allowed).
+   2. stage_change_snapshot (apply the edit), then search_filter action="deny"
+      for that same traffic (EMPTY = every intended flow now passes).
+   3. search_filter invert_search=true (collateral damage OUTSIDE the intended
+      space); add compare_filters for the plain before/after. STOP.
+
+H) "Validate this config edit / what did it change?"  [CHANGE]
+   1. stage_change_snapshot (the edit).
+   2. differential_reachability + differential_query on the relevant fact class
+      (routes / bgpSessionStatus / definedStructures).
+   3. network_traceroute to confirm the specific intended flow. STOP.
+
+I) "Any problems with these configs? / health?"  [read-only]
+   1. health_checks  -> the bundle IS the answer. STOP.
+
 CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
 - SCOPE TO THE QUESTION: run the FEWEST checks that answer what was actually
   asked, then reply READY FOR SYNTHESIS. A read-only lookup ("does this ACL
