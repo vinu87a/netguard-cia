@@ -49,7 +49,9 @@ _load_dotenv()
 MAX_TRANSLATOR_ITERATIONS = 40
 # Verify -> remediate -> re-verify: how many times the verifier may send the
 # translator back for missing checks before the verdict proceeds with a floor.
+# A read-only QUERY needs far less — it has an answer, not a change to stress-test.
 MAX_VERIFY_CYCLES = 5
+MAX_VERIFY_CYCLES_QUERY = 1
 
 # Minimal per-message output-format reminders. The domain rules live in the
 # worker/sub-agent prompts; these only restate the OUTPUT SHAPE, which this
@@ -1154,8 +1156,17 @@ def _translator_context(ledger: Ledger) -> str:
     )
 
 
+_VERIFIER_QUERY_SCOPE = (
+    "\n\n## OUTPUT MODE: QUERY (read-only)\n"
+    "This is a read-only QUESTION — nothing was changed. Judge ONLY whether a "
+    "check directly answers the user's SPECIFIC question. Do NOT ask for "
+    "before/after comparisons, failover, loop checks, blast-radius, or "
+    "multi-vantage probes unless the question itself is about them. If a relevant "
+    "check already answers the question, return complete=true.")
+
+
 def _run_verifier(provider, ledger: Ledger, user_text: str, engine_facts: str,
-                  notify) -> dict | None:
+                  notify, mode: str = "change") -> dict | None:
     """Independent completeness/soundness review. Returns the parsed JSON dict,
     or None if the verifier could not be run or parsed (never fatal — the
     deterministic guards are the hard floor)."""
@@ -1163,6 +1174,8 @@ def _run_verifier(provider, ledger: Ledger, user_text: str, engine_facts: str,
     data = (f"## USER QUESTION\n{user_text}\n\n## SESSION STATE\n"
             f"{json.dumps(ledger.to_public_dict())}\n\n"
             f"## CHECKS RUN AND RESULTS\n{engine_facts}")
+    if mode == "query":
+        data += _VERIFIER_QUERY_SCOPE
     try:
         reply = provider.chat([{"role": "user", "content": data}], role="VERIFIER", format_hint=_VERIFIER_FORMAT)
     except Exception:
@@ -1361,6 +1374,10 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         return ScenarioResult("", "", tool_log, clarification=final_text or
                               "I couldn't classify that scenario — can you rephrase?")
 
+    # Classify now (a read-only query won't become a change during remediation):
+    # it scopes both the verifier's rigor and the final output shape.
+    mode = _scenario_mode(ledger, tool_log)
+
     # ---- deterministic assertion floor (engine's own health gates) -------
     # If the scenario produced a changed/failed snapshot, run the parameterless
     # assertion gates on it. Only gates that REGRESS (newly fail vs base) are
@@ -1403,12 +1420,13 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # MAX_VERIFY_CYCLES times. If still incomplete, proceed with the verifier's
     # recommended_floor (typically INSUFFICIENT-DATA). Deterministic guards
     # remain the hard floor underneath this.
+    verify_cap = MAX_VERIFY_CYCLES_QUERY if mode == "query" else MAX_VERIFY_CYCLES
     verifier_notes = None
     prev_missing = None
-    for cycle in range(MAX_VERIFY_CYCLES + 1):
+    for cycle in range(verify_cap + 1):
         engine_facts = json.dumps(tool_log, indent=1, default=str)
         verifier_notes = _run_verifier(provider, ledger, user_text,
-                                       engine_facts, notify)
+                                       engine_facts, notify, mode=mode)
         missing = (verifier_notes or {}).get("missing_probes")
         if not verifier_notes or not missing:
             break  # verifier satisfied (or unavailable) — done
@@ -1420,11 +1438,11 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
                    "capped result")
             break
         prev_missing = missing_key
-        if cycle >= MAX_VERIFY_CYCLES:
-            notify("Verifier still flags gaps after "
-                   f"{MAX_VERIFY_CYCLES} cycles — proceeding with a capped result")
+        if cycle >= verify_cap:
+            notify(f"Verifier still flags gaps after {verify_cap} "
+                   "cycle(s) — proceeding with a capped result")
             break
-        notify(f"Verifier flagged gaps (cycle {cycle + 1}/{MAX_VERIFY_CYCLES}) "
+        notify(f"Verifier flagged gaps (cycle {cycle + 1}/{verify_cap}) "
                "— gathering more evidence")
         messages.append({"role": "user", "content": (
             "VERIFIER found the investigation incomplete. Missing: "
@@ -1444,7 +1462,8 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     engine_facts = json.dumps(tool_log, indent=1, default=str)
 
     # ---- synthesizer -----------------------------------------------------
-    mode = _scenario_mode(ledger, tool_log)
+    # `mode` was classified before the verify loop; a query never becomes a
+    # change during remediation, so it is still authoritative here.
     notify("Synthesizing answer" if mode == "query" else "Synthesizing verdict")
 
     floor = gate_floor
