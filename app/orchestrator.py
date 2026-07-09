@@ -1231,6 +1231,14 @@ _CHECKS_RUN_HEADER = ("\n\n## CHECKS ALREADY RUN (this question) — authoritati
                       "trust this list over memory, do NOT repeat these:\n")
 
 
+def _norm_probes(missing) -> tuple:
+    """Order-insensitive, case-insensitive key for a verifier's missing_probes,
+    so the loop can detect when the verifier is repeating the same asks."""
+    if not missing:
+        return ()
+    return tuple(sorted(str(m).strip().lower() for m in missing))
+
+
 def _append_checks_recap(messages: list[dict], tool_log: list[dict]) -> None:
     """Attach the cumulative recap to the most recent tool-result message so it
     rides along in the delta the worker receives on its next turn."""
@@ -1370,6 +1378,7 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # recommended_floor (typically INSUFFICIENT-DATA). Deterministic guards
     # remain the hard floor underneath this.
     verifier_notes = None
+    prev_missing = None
     for cycle in range(MAX_VERIFY_CYCLES + 1):
         engine_facts = json.dumps(tool_log, indent=1, default=str)
         verifier_notes = _run_verifier(provider, ledger, user_text,
@@ -1377,6 +1386,14 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         missing = (verifier_notes or {}).get("missing_probes")
         if not verifier_notes or not missing:
             break  # verifier satisfied (or unavailable) — done
+        # CONVERGENCE GUARD: if the verifier repeats the same asks it made last
+        # cycle, remediation isn't satisfying it — stop churning verifier calls.
+        missing_key = _norm_probes(missing)
+        if missing_key == prev_missing:
+            notify("Verifier is repeating the same gaps — proceeding with a "
+                   "capped verdict")
+            break
+        prev_missing = missing_key
         if cycle >= MAX_VERIFY_CYCLES:
             notify("Verifier still flags gaps after "
                    f"{MAX_VERIFY_CYCLES} cycles — proceeding with a capped verdict")
@@ -1389,7 +1406,14 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
             "traceroute from an interior device, differential_reachability, "
             "detect_loops as applicable), then reply READY FOR SYNTHESIS."
             + _CHECKS_RUN_HEADER + _checks_run_summary(tool_log))})
+        n_before = len(tool_log)
         _translator_rounds(provider, ops, ledger, messages, tool_log, notify)
+        # PROGRESS GUARD: if remediation gathered no new check, re-verifying will
+        # only repeat the same gap — stop and let the floor apply.
+        if len(tool_log) == n_before:
+            notify("No new checks could be gathered — proceeding with a capped "
+                   "verdict")
+            break
 
     engine_facts = json.dumps(tool_log, indent=1, default=str)
 
