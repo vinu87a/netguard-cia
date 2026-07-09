@@ -619,6 +619,71 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "bgp_compatibility",
+        "description": (
+            "Configured BGP session COMPATIBILITY — why a peering will or won't "
+            "come up at the config level (NO_LOCAL_IP, UNKNOWN_REMOTE, "
+            "NO_MATCH_FOUND …). Complements bgp_session_status (which reports "
+            "established state). Use when a change touches BGP peering/addressing "
+            "and you need to know why a session breaks. Optional nodes / "
+            "remote_nodes scope."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "remote_nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "bgp_rib",
+        "description": (
+            "Routes in the BGP RIB (learned via BGP, before best-path selection) "
+            "— richer than routes_to when the question is specifically about BGP "
+            "advertisement/receipt. Optional nodes and prefix (network) scope."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "prefix": {"type": "string", "description": "e.g. 2.128.0.0/16"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "bgp_edges",
+        "description": "Established BGP adjacencies (who peers with whom). "
+                       "Optional nodes / remote_nodes scope.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "remote_nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "prefix_tracer",
+        "description": (
+            "Trace how a prefix propagates (originated / received / advertised / "
+            "installed) across the network — answers 'does this prefix still "
+            "reach device X after the change?'. Requires prefix; optional nodes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prefix": {"type": "string", "description": "e.g. 2.128.0.0/16"},
+                "nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+            "required": ["prefix"],
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -845,6 +910,22 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
     if name == "filter_line_reachability":
         return _truncate(_ENGINE.filter_line_reachability(
             net, snap, filters=args.get("filters"),
+            nodes=_normalize_node_spec(args.get("nodes"))))
+    if name == "bgp_compatibility":
+        return _truncate(_ENGINE.bgp_compatibility(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            remote_nodes=_normalize_node_spec(args.get("remote_nodes"))))
+    if name == "bgp_rib":
+        return _truncate(_ENGINE.bgp_rib(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            prefix=args.get("prefix")))
+    if name == "bgp_edges":
+        return _truncate(_ENGINE.bgp_edges(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            remote_nodes=_normalize_node_spec(args.get("remote_nodes"))))
+    if name == "prefix_tracer":
+        return _truncate(_ENGINE.prefix_tracer(
+            net, snap, args["prefix"],
             nodes=_normalize_node_spec(args.get("nodes"))))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))

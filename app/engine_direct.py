@@ -111,6 +111,68 @@ class DirectEngine:
             ),
         }
 
+    # -- BGP depth: why a peer breaks, learned routes, adjacencies, propagation -
+    def bgp_compatibility(self, network: str, snapshot: str,
+                          nodes: str | None = None,
+                          remote_nodes: str | None = None) -> dict:
+        """Configured BGP session compatibility — WHY a session will/won't come
+        up (config-level match), complementing bgp_session_status (established
+        state). Surfaces NO_MATCH_FOUND / incompatible pairings."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        if remote_nodes:
+            kw["remoteNodes"] = remote_nodes
+        df = bf.q.bgpSessionCompatibility(**kw).answer().frame()
+        status_col = next((c for c in df.columns if "Status" in c), None)
+        summary: dict[str, int] = {}
+        problems = df
+        if status_col:
+            summary = {str(k): int(v)
+                       for k, v in df[status_col].value_counts().items()}
+            problems = df[~df[status_col].astype(str).isin(
+                ["UNIQUE_MATCH", "DYNAMIC_MATCH"])]
+        return {"summary": summary, "problem_count": int(len(problems)),
+                "problems": _records(problems)}
+
+    def bgp_rib(self, network: str, snapshot: str, nodes: str | None = None,
+                prefix: str | None = None) -> dict:
+        """Routes in the BGP RIB (learned via BGP, before best-path selection)."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        if prefix:
+            kw["network"] = prefix
+        df = bf.q.bgpRib(**kw).answer().frame()
+        return {"route_count": int(len(df)), "routes": _records(df)}
+
+    def bgp_edges(self, network: str, snapshot: str, nodes: str | None = None,
+                  remote_nodes: str | None = None) -> dict:
+        """Established BGP adjacencies (who peers with whom)."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        if remote_nodes:
+            kw["remoteNodes"] = remote_nodes
+        df = bf.q.bgpEdges(**kw).answer().frame()
+        return {"edge_count": int(len(df)), "edges": _records(df)}
+
+    def prefix_tracer(self, network: str, snapshot: str, prefix: str,
+                      nodes: str | None = None) -> dict:
+        """Trace how a prefix propagates (originated / received / advertised /
+        installed) across the network — 'does this prefix still reach X after
+        the change'."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {"prefix": prefix}
+        if nodes:
+            kw["nodes"] = nodes
+        df = bf.q.prefixTracer(**kw).answer().frame()
+        return {"prefix": prefix, "row_count": int(len(df)),
+                "trace": _records(df)}
+
     # -- native diff: what did the change break --------------------------------
     def differential_reachability(self, network: str, snapshot: str,
                                   reference_snapshot: str) -> dict:

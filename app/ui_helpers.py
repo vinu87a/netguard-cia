@@ -146,6 +146,10 @@ FRIENDLY_CHECK = {
     "search_filter": "ACL flow search",
     "compare_filters": "ACL before/after",
     "filter_line_reachability": "ACL dead-line check",
+    "bgp_compatibility": "BGP compatibility check",
+    "bgp_rib": "BGP route table",
+    "bgp_edges": "BGP adjacencies",
+    "prefix_tracer": "Prefix propagation trace",
 }
 def _loads(result: str):
     try:
@@ -239,6 +243,19 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
         elif tool == "filter_line_reachability" and isinstance(r, dict):
             target = "shadowed/dead ACL lines"
             outcome = f"{r.get('unreachable_line_count', '?')} unreachable lines"
+        elif tool == "bgp_compatibility" and isinstance(r, dict):
+            target = "configured BGP sessions"
+            outcome = (", ".join(f"{k} {v}" for k, v in (r.get("summary") or {}).items())
+                       or f"{r.get('problem_count', '?')} problems")
+        elif tool == "bgp_rib" and isinstance(r, dict):
+            target = f"BGP RIB{(' for ' + args['prefix']) if args.get('prefix') else ''}"
+            outcome = f"{r.get('route_count', '?')} BGP routes"
+        elif tool == "bgp_edges" and isinstance(r, dict):
+            target = "BGP adjacencies"
+            outcome = f"{r.get('edge_count', '?')} peerings"
+        elif tool == "prefix_tracer" and isinstance(r, dict):
+            target = f"propagation of {r.get('prefix')}"
+            outcome = f"{r.get('row_count', '?')} propagation records"
         elif tool == "routes_to" and isinstance(r, dict):
             target = f"RIB routes to {args.get('prefix')}"
             outcome = f"{r.get('route_count')} routes"

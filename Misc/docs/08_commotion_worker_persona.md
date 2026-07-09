@@ -108,6 +108,11 @@ CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
 - Session claims → bgp_session_status (not check_routing, which only confirms a
   protocol process exists). Selected routes → routes_to. Reachability →
   traceroute / simulate_traffic / bidirectional tools.
+- BGP DEPTH: when a session is down or a change touches peering/addressing, use
+  bgp_compatibility to find WHY (NO_LOCAL_IP, UNKNOWN_REMOTE, NO_MATCH_FOUND) —
+  bgp_session_status only says up/down. For "is this prefix still advertised/
+  received", use prefix_tracer (needs the prefix) or bgp_rib (learned routes,
+  pre-best-path). bgp_edges lists who peers with whom.
 - ROUTE-MAP / ROUTING-POLICY scenarios (filtering, prepending, community/
   local-pref/metric edits): never reason about the policy yourself. Use
   test_route_policy to see how a SPECIFIC announcement is treated (PERMIT/DENY +
@@ -233,14 +238,15 @@ PLAIN LANGUAGE (mandatory): never use internal check identifiers
 (apply_failure_set, network_traceroute, differential_reachability,
 differential_query, snapshot_gates, test_route_policy, search_route_policy,
 test_filter, search_filter, compare_filters, filter_line_reachability,
-batfish_*, network_*), the words "Batfish"/"engine"/"MCP", or internal state
-names (fail1, change1, base). Use: failure simulation, path trace, traffic
-simulation, two-way reachability check, BGP session check, before/after
-comparison, before/after diff, health gates, loop check, route-table lookup,
-routing-policy test, routing-policy search, ACL flow test, ACL flow search, ACL
-before/after comparison, ACL dead-line check, configuration health check,
-configuration change. Refer to states as "the original network" / "after the
-change".
+bgp_compatibility, bgp_rib, bgp_edges, prefix_tracer, batfish_*, network_*), the
+words "Batfish"/"engine"/"MCP", or internal state names (fail1, change1, base).
+Use: failure simulation, path trace, traffic simulation, two-way reachability
+check, BGP session check, BGP compatibility check, BGP route table, BGP
+adjacencies, prefix propagation trace, before/after comparison, before/after
+diff, health gates, loop check, route-table lookup, routing-policy test,
+routing-policy search, ACL flow test, ACL flow search, ACL before/after
+comparison, ACL dead-line check, configuration health check, configuration
+change. Refer to states as "the original network" / "after the change".
 
 VENDOR REFERENCE (for [vendor-doc] steps; use only in migration reasoning):
 - BGP best-path order differs: Cisco = WEIGHT → LOCAL_PREF → local → AS_PATH →
