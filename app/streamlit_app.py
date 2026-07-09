@@ -149,11 +149,14 @@ def render_answer(result) -> str:
     Returns markdown to persist in chat history."""
     parts: list[str] = []
 
+    is_query = getattr(result, "mode", "change") == "query"
+    zone_label = "answer" if is_query else "verdict"
     fields = parse_verdict(result.verdict or "")
 
-    # colored verdict banner (status color + icon + label — never color alone)
+    # colored banner (status color + icon + label — never color alone)
     label, icon, accent, text_col = verdict_status(fields)
-    headline = (fields.get("VERDICT") or "").split("\n")[0]
+    headline = ((fields.get("VERDICT") or fields.get("ANSWER") or "")
+                .split("\n")[0])
     st.markdown(
         f'<div class="verdict-banner" style="border-color:{accent};'
         f'background:{accent}18;color:{text_col}">'
@@ -165,10 +168,11 @@ def render_answer(result) -> str:
 
     rows = verdict_summary_rows(fields)
     if rows:
-        st.markdown("#### Verdict at a glance")
-        df = pd.DataFrame(rows, columns=["", "Answer"]).set_index("")
+        glance = "Answer at a glance" if is_query else "Verdict at a glance"
+        st.markdown(f"#### {glance}")
+        df = pd.DataFrame(rows, columns=["", "Value"]).set_index("")
         st.table(df)
-        parts.append("**Verdict at a glance**\n\n"
+        parts.append(f"**{glance}**\n\n"
                      + "\n".join(f"- **{k}:** {v}" for k, v in rows))
 
     frows = facts_rows(result.tool_log)
@@ -184,9 +188,9 @@ def render_answer(result) -> str:
         st.markdown("#### Findings")
         st.markdown(result.findings)
         parts.append(f"**Findings**\n\n{result.findings}")
-    st.markdown("#### Full verdict")
+    st.markdown(f"#### Full {zone_label}")
     st.markdown(result.verdict)
-    parts.append(f"**Verdict**\n\n{result.verdict}")
+    parts.append(f"**{zone_label.capitalize()}**\n\n{result.verdict}")
 
     # before/after topology when the scenario changed the network
     ledger = st.session_state.ledger

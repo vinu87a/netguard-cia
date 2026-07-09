@@ -69,13 +69,25 @@ _VERIFIER_FORMAT = (
     '"recommended_floor": "GO"|"GO-WITH-CONDITIONS"|"NO-GO"|'
     '"INSUFFICIENT-DATA"|null}'
 )
-_SYNTHESIZER_FORMAT = (
+# CHANGE scenarios (a failure/edit was applied) get a Go/No-Go verdict; read-only
+# QUERY scenarios get a direct answer instead — a verdict would be a category
+# error (nothing is being approved).
+_SYNTHESIZER_FORMAT_CHANGE = (
     'Output two zones. First a line "FINDINGS" then one bullet per check tagged '
     '[verified]. Then a line beginning "VERDICT:" followed by <GO|'
     'GO-WITH-CONDITIONS|NO-GO|INSUFFICIENT-DATA> and these headers each on their '
     'own line: CONFIDENCE:, IMPACTED SERVICES / COMPONENTS:, PACKET-FLOW:, '
     'REASONING:, CONDITIONS:, ROLLBACK:, RESIDUAL-UNKNOWNS:. Plain language '
     'only — no internal check names, no "Batfish", no snapshot IDs.'
+)
+_SYNTHESIZER_FORMAT_QUERY = (
+    'This is a read-only QUESTION, not a proposed change — do NOT give a Go/No-Go '
+    'verdict. Output two zones. First a line "FINDINGS" then one bullet per check '
+    'tagged [verified]. Then a line beginning "ANSWER:" that directly answers the '
+    'question in one or two sentences, and these headers each on their own line: '
+    'STATUS: <OK|ATTENTION>, CONFIDENCE:, EVIDENCE:, RESIDUAL-UNKNOWNS:. Use '
+    'ATTENTION only if the answer surfaces a real problem. Plain language only — '
+    'no internal check names, no "Batfish", no snapshot IDs.'
 )
 
 
@@ -1185,6 +1197,20 @@ class ScenarioResult:
     verdict: str
     tool_log: list[dict]
     clarification: str | None = None   # set when the translator asked a question
+    mode: str = "change"               # "change" (Go/No-Go) or "query" (Answer)
+
+
+def _scenario_mode(ledger: Ledger, tool_log: list[dict]) -> str:
+    """CHANGE if the turn actually mutated the network (a failure or config edit
+    was applied), else QUERY (read-only). Deterministic — no LLM guess: a
+    Go/No-Go verdict only makes sense when there is a proposed change to approve;
+    a read-only question gets a direct answer instead."""
+    if ledger.current != ledger.base:
+        return "change"
+    applied = any(
+        e.get("tool") in ("apply_failure_set", "stage_change_snapshot")
+        and not e.get("is_error") for e in tool_log)
+    return "change" if applied else "query"
 
 
 _FALSE_REFUSAL_RE = re.compile(
@@ -1418,7 +1444,8 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     engine_facts = json.dumps(tool_log, indent=1, default=str)
 
     # ---- synthesizer -----------------------------------------------------
-    notify("Synthesizing verdict")
+    mode = _scenario_mode(ledger, tool_log)
+    notify("Synthesizing answer" if mode == "query" else "Synthesizing verdict")
 
     floor = gate_floor
     if verifier_notes and verifier_notes.get("recommended_floor"):
@@ -1426,7 +1453,13 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
                   f"be no better than {verifier_notes['recommended_floor']} — do "
                   "not exceed it unless the results clearly refute the concern.\n")
 
-    synth_user = f"""## SCENARIO (user's words)
+    mode_line = ("OUTPUT MODE: QUERY (read-only question — give a direct ANSWER, "
+                 "not a Go/No-Go verdict)" if mode == "query"
+                 else "OUTPUT MODE: CHANGE (a failure/edit was applied — give a "
+                 "Go/No-Go VERDICT)")
+    synth_user = f"""## {mode_line}
+
+## SCENARIO (user's words)
 {user_text}
 
 ## SESSION STATE
@@ -1441,12 +1474,13 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
 ## STRUCTURED CHECK RESULTS (the ONLY source of facts)
 {engine_facts}
 """
+    fmt = (_SYNTHESIZER_FORMAT_QUERY if mode == "query"
+           else _SYNTHESIZER_FORMAT_CHANGE)
     synth = provider.chat([{"role": "user", "content": synth_user}],
-                          role="SYNTHESIZER",
-                          format_hint=_SYNTHESIZER_FORMAT)
+                          role="SYNTHESIZER", format_hint=fmt)
     # robust two-zone split (tolerant of markdown headers) + plain-language net
     findings, verdict = split_findings_verdict(strip_internal_terms(synth.content))
-    return ScenarioResult(findings, verdict, tool_log)
+    return ScenarioResult(findings, verdict, tool_log, mode=mode)
 
 
 # --------------------------------------------------------------------------

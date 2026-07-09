@@ -12,7 +12,10 @@ import re
 # Verdict parsing (docs/05 two-zone format -> summary table rows)
 # ---------------------------------------------------------------------------
 _VERDICT_FIELDS = [
-    "VERDICT", "CONFIDENCE", "IMPACTED SERVICES / COMPONENTS", "PACKET-FLOW",
+    # change-mode (Go/No-Go) fields + query-mode (Answer) fields; the parser
+    # picks up whichever the synthesizer emitted for this scenario.
+    "VERDICT", "ANSWER", "STATUS", "CONFIDENCE",
+    "IMPACTED SERVICES / COMPONENTS", "PACKET-FLOW", "EVIDENCE",
     "REASONING", "CONDITIONS", "ROLLBACK", "RESIDUAL-UNKNOWNS",
 ]
 # Tolerant matchers: capable models decorate the output (## headers, **bold**,
@@ -24,7 +27,8 @@ _FIELD_RE = re.compile(
     + r")\s*:?\s*(.*)$",
     re.IGNORECASE,
 )
-_VERDICT_HEADER_RE = re.compile(r"^" + _MD_PREFIX + r"VERDICT\b\s*:?",
+# the second zone starts at VERDICT: (change) or ANSWER: (query)
+_VERDICT_HEADER_RE = re.compile(r"^" + _MD_PREFIX + r"(?:VERDICT|ANSWER)\b\s*:?",
                                 re.IGNORECASE | re.MULTILINE)
 
 
@@ -83,9 +87,12 @@ def verdict_summary_rows(fields: dict[str, str]) -> list[tuple[str, str]]:
     """The one-glance rows for the summary table (full prose stays below)."""
     order = [
         ("VERDICT", "Verdict"),
+        ("ANSWER", "Answer"),
+        ("STATUS", "Status"),
         ("CONFIDENCE", "Confidence"),
         ("IMPACTED SERVICES / COMPONENTS", "Impacted services"),
         ("PACKET-FLOW", "Packet flow"),
+        ("EVIDENCE", "Evidence"),
         ("CONDITIONS", "Conditions"),
         ("ROLLBACK", "Rollback"),
     ]
@@ -107,18 +114,31 @@ _STATUS = {
     "INSUFFICIENT-DATA": ("Insufficient data", "❔", "#8a94a1", "#3d4652"),
     "NO-GO": ("NO-GO", "⛔", "#d03b3b", "#8f1f1f"),
     "GO": ("GO", "✅", "#0ca30c", "#0a6b0a"),
+    # query-mode (read-only answer) statuses — not deployment decisions
+    "ATTENTION": ("Attention", "⚠️", "#fab219", "#7a5200"),
+    "OK": ("OK", "✅", "#0ca30c", "#0a6b0a"),
+    "ANSWER": ("Answer", "💬", "#4b7bec", "#274796"),
 }
 
 
 def verdict_status(fields: dict[str, str]) -> tuple[str, str, str, str]:
-    """(label, icon, accent_hex, text_hex) for the verdict banner."""
+    """(label, icon, accent_hex, text_hex) for the result banner. Handles both a
+    change VERDICT (Go/No-Go) and a query ANSWER (OK / Attention / neutral)."""
     v = (fields.get("VERDICT") or "").upper().replace(" ", "").replace("_", "-")
-    for key in ("GO-WITH-CONDITIONS", "INSUFFICIENT-DATA", "NO-GO", "GO"):
-        if key.replace("-", "") in v.replace("-", ""):
-            if key == "GO" and "NO-GO" in v.replace("NOGO", "NO-GO"):
-                continue
-            return _STATUS[key]
-    return _STATUS["INSUFFICIENT-DATA"]
+    if v:  # change mode
+        for key in ("GO-WITH-CONDITIONS", "INSUFFICIENT-DATA", "NO-GO", "GO"):
+            if key.replace("-", "") in v.replace("-", ""):
+                if key == "GO" and "NO-GO" in v.replace("NOGO", "NO-GO"):
+                    continue
+                return _STATUS[key]
+        return _STATUS["INSUFFICIENT-DATA"]
+    # query mode: derive from the STATUS field if present, else neutral
+    s = (fields.get("STATUS") or "").upper()
+    if "ATTENTION" in s or "WARN" in s or "FAIL" in s:
+        return _STATUS["ATTENTION"]
+    if "OK" in s or "PASS" in s or "HEALTHY" in s:
+        return _STATUS["OK"]
+    return _STATUS["ANSWER"]
 
 
 # ---------------------------------------------------------------------------
