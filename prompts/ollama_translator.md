@@ -68,7 +68,10 @@ KEY RULES:
 - VANTAGE POINTS: after failing something on device X, do NOT judge reachability
   only from X — probe from at least one interior device too.
 - PROOF vs SAMPLE: for GLOBAL claims ("reachable everywhere / fully isolated"),
-  use reachability_search (searches ALL flows) — search the VIOLATION, expect zero.
+  use reachability_search (searches ALL flows) — search the VIOLATION, expect
+  zero. Its start_location/end_location are DEVICES or interfaces (e.g.
+  "as1core1"), NOT IP addresses; put source/destination IP ranges in
+  headers (srcIps / dstIps).
 - traceroute/simulate destinations must be a HOST IP that exists in the model —
   a bare prefix like 2.128.0.0/16 won't resolve; use a host in it (e.g. 2.128.0.1).
 - Session status -> bgp_session_status (not check_routing). Selected routes ->

@@ -892,6 +892,11 @@ def _normalize_node_spec(spec):
 
 _REACH_HEADER_KEYS = {"srcIps", "dstIps", "srcPorts", "dstPorts",
                       "ipProtocols", "applications"}
+# an IPv4 address or CIDR (optionally a comma-separated set) — NOT a valid
+# Batfish location specifier, so it belongs in headers (srcIps/dstIps), not in a
+# start/end location where it would crash the engine.
+_IP_LIKE = re.compile(r"^\s*\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?"
+                      r"(\s*,\s*\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?)*\s*$")
 
 
 def _coerce_reachability_args(args: dict) -> dict:
@@ -934,6 +939,17 @@ def _coerce_reachability_args(args: dict) -> dict:
     for k in list(_REACH_HEADER_KEYS):
         if k in out:
             headers.setdefault(k, out.pop(k))
+
+    # a start/end location given as an IP or CIDR is really a source/dest IP
+    # constraint — move it to headers so it doesn't crash the location parser.
+    sl = out.get("start_location")
+    if isinstance(sl, str) and _IP_LIKE.match(sl):
+        headers.setdefault("srcIps", sl.strip())
+        out.pop("start_location", None)
+    el = out.get("end_location")
+    if isinstance(el, str) and _IP_LIKE.match(el):
+        headers.setdefault("dstIps", el.strip())
+        out.pop("end_location", None)
 
     out["actions"] = actions[0] if actions else "success"
     if headers:
