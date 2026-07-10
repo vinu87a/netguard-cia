@@ -15,14 +15,35 @@ get up to two corrective retries before the provider is declared failed.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 from openai import OpenAI
+
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_OLLAMA_ROLE_FILE = {
+    "TRANSLATOR": "ollama_translator.md",
+    "VERIFIER": "ollama_verifier.md",
+    "SYNTHESIZER": "ollama_synthesizer.md",
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _ollama_role_prompt(role: str | None) -> str | None:
+    """Full system prompt for a role — Ollama has no server-side persona, so the
+    app supplies the behavior. (Commotion, by contrast, owns these prompts on the
+    platform and the app sends thin messages.)"""
+    fn = _OLLAMA_ROLE_FILE.get(role or "")
+    if not fn:
+        return None
+    p = _PROMPTS_DIR / fn
+    return p.read_text() if p.exists() else None
 
 
 @dataclass
@@ -58,12 +79,16 @@ class OpenAIProvider:
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              role: str | None = None, format_hint: str | None = None) -> LLMReply:
-        # role/format_hint are Commotion routing/format hints; Ollama uses the
-        # system prompt directly, so they're ignored here (single call surface).
         model = self._translator_model if tools else self._synthesizer_model
+        # Ollama has no server-side persona, so prepend the role's full system
+        # prompt (behavior lives in prompts/ollama_*.md). The app's thin
+        # per-role data messages then follow. format_hint is redundant here (the
+        # output format is in the role prompt) and is ignored.
+        rp = _ollama_role_prompt(role)
+        msgs = ([{"role": "system", "content": rp}] + messages) if rp else messages
         try:
             resp = self._client.chat.completions.create(
-                model=model, max_tokens=16000, messages=messages,
+                model=model, max_tokens=16000, messages=msgs,
                 **({"tools": tools} if tools else {}))
         except Exception as e:
             raise ProviderError(f"ollama: {e}") from e
@@ -257,28 +282,31 @@ class FallbackProvider:
 # Factory — reads env, builds the configured chain (fresh per scenario turn)
 # ---------------------------------------------------------------------------
 def build_provider(on_switch=None):
-    """NETGUARD_LLM_PROVIDER: a single provider name (default 'commotion'), or a
-    'primary,fallback' chain if you explicitly want a fallback. Default is
-    Commotion only — the worker owns the persona, so the app sends thin
-    (ROLE + data) messages that assume a persona-configured worker.
+    """NETGUARD_LLM_PROVIDER: a single provider name, or a 'primary,fallback'
+    chain. Default is **ollama**.
 
-    NOTE: the thin-message mode is Commotion-specific. If you set 'ollama'
-    here, the app would send it no behavioral instructions and it would fail —
-    Ollama would need the full prompts restored. Kept only as an escape hatch.
+    NOTE (2026-07-10): Commotion is PAUSED — the platform is having issues and,
+    separately, was ~79s per round-trip. We switched to Ollama Cloud (fast,
+    native function-calling). Ollama has no server-side persona, so each role's
+    full prompt lives in prompts/ollama_*.md and OpenAIProvider prepends it.
+    To switch BACK to Commotion: uncomment the commotion branch in make() below
+    and set NETGUARD_LLM_PROVIDER=commotion in .env. The CommotionProvider class
+    and all its code remain intact.
     """
     spec = os.environ.get("NETGUARD_LLM_PROVIDER", "").strip().lower()
     if not spec:
-        spec = "commotion" if os.environ.get("COMMOTION_API_KEY") else "ollama"
+        spec = "ollama"
 
     def make(name: str):
-        if name == "commotion":
-            return CommotionProvider(
-                url=os.environ.get("COMMOTION_URL", ""),
-                api_key=os.environ.get("COMMOTION_API_KEY", ""),
-                worker_id=os.environ.get("COMMOTION_WORKER_ID", ""),
-                audience_id=os.environ.get("COMMOTION_AUDIENCE_ID", "RPA"),
-                route_selector=os.environ.get("COMMOTION_ROUTE_SELECTOR",
-                                               "aicoe_workspace"))
+        # --- COMMOTION (PAUSED — re-enable by uncommenting) --------------------
+        # if name == "commotion":
+        #     return CommotionProvider(
+        #         url=os.environ.get("COMMOTION_URL", ""),
+        #         api_key=os.environ.get("COMMOTION_API_KEY", ""),
+        #         worker_id=os.environ.get("COMMOTION_WORKER_ID", ""),
+        #         audience_id=os.environ.get("COMMOTION_AUDIENCE_ID", "RPA"),
+        #         route_selector=os.environ.get("COMMOTION_ROUTE_SELECTOR",
+        #                                        "aicoe_workspace"))
         if name == "ollama":
             return OpenAIProvider(
                 base_url=os.environ.get("OLLAMA_BASE_URL", "https://ollama.com/v1"),
@@ -287,7 +315,8 @@ def build_provider(on_switch=None):
                                                  "qwen3-coder:480b"),
                 synthesizer_model=os.environ.get("NETGUARD_SYNTHESIZER_MODEL",
                                                   "gpt-oss:120b"))
-        raise ProviderError(f"unknown LLM provider {name!r}")
+        raise ProviderError(f"unknown LLM provider {name!r} "
+                            "(commotion is paused — see build_provider docstring)")
 
     names = [n.strip() for n in spec.split(",") if n.strip()]
     providers = [make(n) for n in names]
