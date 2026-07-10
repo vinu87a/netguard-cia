@@ -1,0 +1,11 @@
+# NetGuard-CIA Python dependencies (pinned to the tested versions).
+# Install into a venv:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+streamlit==1.58.0
+pandas==3.0.3
+httpx==0.28.1
+openai==2.44.0
+matplotlib==3.11.0
+networkx==3.6.1
+pybatfish==2025.7.7.2423
+mcp==1.28.1
+openpyxl==3.1.5

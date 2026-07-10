@@ -77,24 +77,43 @@ active keeps those failures applied.
 
 ## Quickstart
 
-Prereqs: Docker (≈4 GB RAM free for the engine), Python 3.11+, an
-[Ollama Cloud](https://ollama.com) API key.
+Prereqs: Docker (≈4 GB RAM free for the engine), Python 3.11+, and LLM
+credentials (a Commotion AI-worker, or an [Ollama Cloud](https://ollama.com) key).
+
+**One command** (starts Docker, waits for the engine, installs deps, launches the app):
 
 ```bash
 git clone https://github.com/vinu87a/netguard-cia.git
 cd netguard-cia
 
+# create .env at the repo root with your LLM credentials (see below), then:
+./run.sh
+```
+
+<details><summary>Or run each step manually</summary>
+
+```bash
 # 1) analysis stack (two containers, images pinned)
-cd docker && docker compose up -d --wait && cd ..
+docker compose -f docker/docker-compose.yml up -d --wait
 
 # 2) python env
-python3 -m venv .venv && .venv/bin/pip install -r app/requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# 3) LLM credentials — create .env at the repo root:
-echo "OLLAMA_API_KEY=your-key-here" > .env
+# 3) run
+.venv/bin/streamlit run app/streamlit_app.py --server.port 8501
+```
+</details>
 
-# 4) run
-.venv/bin/streamlit run app/streamlit_app.py
+Create a **`.env`** at the repo root (gitignored) with the Commotion worker
+credentials:
+
+```
+NETGUARD_LLM_PROVIDER=commotion
+COMMOTION_URL=https://uat-services.solutions.tatacommunications.com/gateway/aiworker/run
+COMMOTION_API_KEY=your-key
+COMMOTION_WORKER_ID=your-worker-id
+COMMOTION_AUDIENCE_ID=RPA
+COMMOTION_ROUTE_SELECTOR=aicoe_workspace
 ```
 
 Open http://localhost:8501, upload configs from one of the demo scenarios,
