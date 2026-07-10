@@ -1002,6 +1002,48 @@ def _coerce_failure_args(args: dict) -> dict:
     return out
 
 
+_TOOL_SCHEMA = {t["name"]: t["input_schema"] for t in TRANSLATOR_TOOLS}
+
+
+def _arg_empty(v) -> bool:
+    return v is None or v == "" or v == [] or v == {}
+
+
+def _validate_tool_args(name: str, args: dict) -> str | None:
+    """Generic pre-flight check of a translator tool call against its JSON
+    schema — BEFORE it reaches the engine. Returns an actionable error string to
+    hand back to the translator, or None if the call is acceptable.
+
+    It first applies the same shape-coercions the executor will (so a call that
+    the coercions would fix is NOT bounced), then checks the two high-confidence,
+    low-false-positive failure modes: an unknown tool, a missing REQUIRED
+    argument, and an OBJECT-typed argument passed as a non-object. Semantic
+    issues a schema can't express (e.g. a CIDR where a device is expected) stay
+    the job of the tool-specific coercions and the engine's own errors."""
+    schema = _TOOL_SCHEMA.get(name)
+    if schema is None:
+        return (f"unknown tool {name!r}. Choose one of: "
+                f"{', '.join(sorted(_TOOL_SCHEMA))}.")
+    eff = dict(args or {})
+    if name == "apply_failure_set":
+        eff = _coerce_failure_args(eff)
+    elif name == "reachability_search":
+        eff = _coerce_reachability_args(eff)
+
+    props = schema.get("properties", {})
+    missing = [r for r in schema.get("required", []) if _arg_empty(eff.get(r))]
+    if missing:
+        return (f"{name}: missing required argument(s) {missing}. "
+                f"This tool's arguments are {list(props)}. "
+                "Reply with a corrected call.")
+    for k, spec in props.items():
+        if k in eff and not _arg_empty(eff[k]) \
+                and spec.get("type") == "object" and not isinstance(eff[k], dict):
+            return (f"{name}: argument '{k}' must be a JSON object like {{...}}, "
+                    f"but got a {type(eff[k]).__name__}. Fix '{k}' and retry.")
+    return None
+
+
 def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
                              name: str, args: dict) -> str:
     """Map a translator tool call onto MCP calls, direct-engine questions, and
@@ -1396,18 +1438,31 @@ def _translator_rounds(provider, ops: BatfishOps, ledger: Ledger,
                                           "arguments": json.dumps(tc.arguments)}}
                             for tc in reply.tool_calls]})
         for tc in reply.tool_calls:
-            notify(f"Running: {FRIENDLY_CHECK.get(tc.name, tc.name.replace('_', ' '))}")
-            try:
-                out = _execute_translator_tool(ops, ledger, tc.name, tc.arguments)
-                is_error = out.startswith("ERROR")
-            except MCPToolError as e:
-                out, is_error = f"ERROR: {e}", True
-            except Exception as e:
-                # Any engine/tool failure (e.g. a malformed specifier the model
-                # supplied) is fed back as an ERROR result so the translator can
-                # correct itself — it must never tear down the whole turn.
-                out = f"ERROR: {tc.name} failed: {type(e).__name__}: {str(e)[:400]}"
-                is_error = True
+            # PRE-FLIGHT: reject a malformed call before it reaches the engine
+            # and hand the specific fix back to the translator (never crashes the
+            # engine or the turn). Tool-specific coercions still auto-fix the
+            # known loose shapes; this catches the rest.
+            preflight = _validate_tool_args(tc.name, tc.arguments)
+            if preflight:
+                out, is_error = f"ERROR (invalid arguments): {preflight}", True
+                notify(f"Fixing arguments for "
+                       f"{FRIENDLY_CHECK.get(tc.name, tc.name.replace('_', ' '))}")
+            else:
+                notify("Running: "
+                       f"{FRIENDLY_CHECK.get(tc.name, tc.name.replace('_', ' '))}")
+                try:
+                    out = _execute_translator_tool(ops, ledger, tc.name,
+                                                   tc.arguments)
+                    is_error = out.startswith("ERROR")
+                except MCPToolError as e:
+                    out, is_error = f"ERROR: {e}", True
+                except Exception as e:
+                    # Any engine/tool failure (e.g. a malformed specifier that
+                    # slipped past pre-flight) is fed back as an ERROR result so
+                    # the translator can correct itself — never a fatal turn.
+                    out = (f"ERROR: {tc.name} failed: {type(e).__name__}: "
+                           f"{str(e)[:400]}")
+                    is_error = True
             tool_log.append({"tool": tc.name, "input": tc.arguments,
                              "result": out, "is_error": is_error})
             messages.append({"role": "tool", "tool_call_id": tc.id,
