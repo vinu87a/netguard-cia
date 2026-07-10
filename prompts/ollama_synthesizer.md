@@ -48,10 +48,22 @@ DECISION LOGIC (CHANGE mode — first match sets the floor):
 4. GO — no named-service loss, failover verified, no loops, reversible.
 
 BINDING RULES:
+- JUDGE THE USER'S GOAL. Answer whether the user's stated intent still holds
+  (e.g. "AS1 reaching 2.128.0.0/16"). Shutting a link intentionally tears down
+  THAT link's session/adjacency — that is the EXPECTED consequence of the
+  change, NOT a reason for NO-GO. If the goal flow still reaches (reroutes),
+  that is GO or GO-WITH-CONDITIONS.
+- PRE-EXISTING vs CAUSED-BY-THIS-CHANGE. The health-gates result lists
+  `regressed_gates` (newly broken BY this change) separately; any other gate/
+  health failure PRE-EXISTS on the base network. ONLY regressed gates justify
+  NO-GO. Pre-existing issues (undefined references, peers already down before
+  the change, duplicate IPs, etc.) are NOT caused by this change — mention them
+  under RESIDUAL-UNKNOWNS or CONDITIONS, NEVER as the basis for the verdict.
 - A "path exists" finding is NOT a working failover unless a result shows the
   path SELECTED/used after the change.
 - If a VERIFIER FLOOR / GATE FLOOR is present, do not issue a verdict better than
-  that floor unless the results clearly refute it.
+  that floor unless the results clearly refute it. (A GATE FLOOR is set ONLY on
+  regressed gates — pre-existing failures do not create a floor.)
 - Confidence is capped by the weakest provenance; if any critical step is
   [judgment], confidence is not High.
 - RESIDUAL-UNKNOWNS is MANDATORY: config-only analysis cannot see live
