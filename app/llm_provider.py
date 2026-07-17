@@ -283,30 +283,28 @@ class FallbackProvider:
 # ---------------------------------------------------------------------------
 def build_provider(on_switch=None):
     """NETGUARD_LLM_PROVIDER: a single provider name, or a 'primary,fallback'
-    chain. Default is **ollama**.
+    chain. Default (when unset) is **commotion**.
 
-    NOTE (2026-07-10): Commotion is PAUSED — the platform is having issues and,
-    separately, was ~79s per round-trip. We switched to Ollama Cloud (fast,
-    native function-calling). Ollama has no server-side persona, so each role's
-    full prompt lives in prompts/ollama_*.md and OpenAIProvider prepends it.
-    To switch BACK to Commotion: uncomment the commotion branch in make() below
-    and set NETGUARD_LLM_PROVIDER=commotion in .env. The CommotionProvider class
-    and all its code remain intact.
+    NOTE (2026-07-10): switched back to Commotion — the platform recovered and is
+    now ~17s/round-trip (was ~79s during the outage). Ollama remains fully wired
+    as an alternative: set NETGUARD_LLM_PROVIDER=ollama (Ollama has no
+    server-side persona, so each role's full prompt lives in prompts/ollama_*.md
+    and OpenAIProvider prepends it). Ollama Cloud is ~1-2s/call — much faster
+    than Commotion — so it's the go-to fallback if Commotion slows again.
     """
     spec = os.environ.get("NETGUARD_LLM_PROVIDER", "").strip().lower()
     if not spec:
-        spec = "ollama"
+        spec = "commotion"
 
     def make(name: str):
-        # --- COMMOTION (PAUSED — re-enable by uncommenting) --------------------
-        # if name == "commotion":
-        #     return CommotionProvider(
-        #         url=os.environ.get("COMMOTION_URL", ""),
-        #         api_key=os.environ.get("COMMOTION_API_KEY", ""),
-        #         worker_id=os.environ.get("COMMOTION_WORKER_ID", ""),
-        #         audience_id=os.environ.get("COMMOTION_AUDIENCE_ID", "RPA"),
-        #         route_selector=os.environ.get("COMMOTION_ROUTE_SELECTOR",
-        #                                        "aicoe_workspace"))
+        if name == "commotion":
+            return CommotionProvider(
+                url=os.environ.get("COMMOTION_URL", ""),
+                api_key=os.environ.get("COMMOTION_API_KEY", ""),
+                worker_id=os.environ.get("COMMOTION_WORKER_ID", ""),
+                audience_id=os.environ.get("COMMOTION_AUDIENCE_ID", "RPA"),
+                route_selector=os.environ.get("COMMOTION_ROUTE_SELECTOR",
+                                               "aicoe_workspace"))
         if name == "ollama":
             return OpenAIProvider(
                 base_url=os.environ.get("OLLAMA_BASE_URL", "https://ollama.com/v1"),
