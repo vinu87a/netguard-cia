@@ -119,6 +119,10 @@ COMMOTION_ROUTE_SELECTOR=aicoe_workspace
 Open http://localhost:8501, upload configs from one of the demo scenarios,
 click **Build snapshot**, and ask away.
 
+> **Deploying to a Linux server?** See **[DEPLOY.md](DEPLOY.md)** — a full Rocky
+> Linux 9 runbook (Docker CE, Python 3.11, SELinux, firewalld, systemd,
+> nginx + TLS).
+
 ### Demo scenarios
 
 `scenarios/` contains five self-contained demos built from the official
