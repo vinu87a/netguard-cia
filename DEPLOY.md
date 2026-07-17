@@ -13,13 +13,75 @@ Tested target: **Rocky Linux 9** (x86_64). Notes for Rocky 8 are called out inli
 | Item | Requirement |
 |---|---|
 | RAM | **16 GB recommended** (the Batfish engine alone wants ~4 GB free) |
-| Disk | ~20 GB (container images + snapshot data volume) |
+| Disk | **20 GB free** — see the space check below (~4 GB is the bare minimum) |
 | Network | Outbound **HTTPS** to your LLM provider (Commotion API / Ollama Cloud) |
 | Access | a sudo-capable, **non-root** user to own and run the app |
 
 ```bash
 sudo dnf update -y
 sudo dnf install -y git curl lsof   # lsof: used by run.sh's port check
+```
+
+### 0.1 Check disk space FIRST (measured footprint)
+
+Two *different* filesystems matter, and they are usually not the same one:
+
+| What | Lands in | Measured size |
+|---|---|---|
+| `batfish/allinone` image | `/var/lib/docker` | **2.12 GB** |
+| `batfish-mcp-container` image | `/var/lib/docker` | **750 MB** |
+| Batfish snapshot volume (`batfish-data`) | `/var/lib/docker` | ~270 MB, **grows with every snapshot** |
+| Docker layers/overlay + build cache | `/var/lib/docker` | ~1–2 GB, grows |
+| Python venv | `/opt/netguard` | **528 MB** |
+| Repo + `.git` | `/opt/netguard` | ~10 MB |
+
+**Bare minimum ≈ 4 GB. Budget 20 GB** so snapshot growth and image updates don't
+wedge you later. The heavy consumer is **`/var/lib/docker`**, *not* `/opt`.
+
+Check before you create anything:
+
+```bash
+df -h /            /opt            /var/lib/docker    # free space per mount
+lsblk                                                 # disk/partition layout
+findmnt -no SOURCE,TARGET,FSTYPE /var/lib/docker      # which FS Docker really uses
+```
+
+> **Rocky's default LVM layout is the trap:** installers often give `/` only
+> ~15–20 GB and hand the bulk to `/home`. `/opt` **and** `/var/lib/docker` both
+> sit on `/` — so Docker can fill root while `/home` sits empty. Check `/`
+> specifically; don't assume "the disk is 500 GB" means you're fine.
+
+**If `/` is tight, pick one:**
+
+**(a) Grow the root LV** — best if the volume group has free extents:
+```bash
+sudo vgs                                   # look for VFree > 0
+sudo lvextend -r -L +20G /dev/mapper/rl-root   # -r also grows the xfs filesystem
+df -h /
+```
+
+**(b) Move Docker's data-root to the big filesystem** — best when `/home` (or a
+separate disk) has the space. Note **XFS cannot be shrunk**, so you can't simply
+take space back from `/home`; relocating Docker is the practical fix.
+```bash
+sudo systemctl stop docker
+sudo mkdir -p /home/docker
+sudo rsync -aHAX --info=progress2 /var/lib/docker/ /home/docker/
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{ "data-root": "/home/docker" }
+EOF
+# SELinux: label the new location or containers won't start
+sudo semanage fcontext -a -t container_var_lib_t '/home/docker(/.*)?'
+sudo restorecon -Rv /home/docker
+sudo systemctl start docker
+docker info | grep -i "docker root dir"    # confirm it moved
+```
+*(`semanage` lives in `policycoreutils-python-utils`: `sudo dnf install -y policycoreutils-python-utils`.)*
+
+**Reclaim space later** (build cache and dangling layers add up fast):
+```bash
+docker system df       # see what's using space
+docker system prune -a # remove unused images/cache (NOT the named data volume)
 ```
 
 ---
@@ -65,6 +127,9 @@ python3.11 --version          # expect 3.11.x
 ---
 
 ## 3. Get the code
+
+> Confirm free space first (§0.1) — `df -h /opt /var/lib/docker`. `/opt` needs
+> only ~600 MB (venv + repo); `/var/lib/docker` is the one that needs ~4–20 GB.
 
 ```bash
 sudo mkdir -p /opt/netguard && sudo chown "$USER":"$USER" /opt/netguard
@@ -305,3 +370,5 @@ docker restart netguard-batfish     # snapshots live in this container — re-up
 | Engine never healthy | not enough RAM (needs ~4 GB free) → `docker logs netguard-batfish` |
 | Scenario cut off mid-run behind nginx | raise `proxy_read_timeout` (§11) |
 | Can't reach :8501 from another host | firewalld → open the port (§8) |
+| `no space left on device` / image pull fails | `/var/lib/docker` full (usually on a small `/`) → §0.1: grow the root LV or move Docker's data-root; `docker system prune -a` to reclaim |
+| Snapshots vanish after `docker compose down -v` | `-v` deletes the `batfish-data` volume → re-upload configs; use plain `down` to keep them |
