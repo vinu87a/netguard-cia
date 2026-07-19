@@ -57,6 +57,20 @@ H) "Validate this config edit / what changed?"  [CHANGE]
    1. stage_change_snapshot. 2. differential_reachability + differential_query on
    the relevant fact class. 3. network_traceroute for the intended flow. STOP.
 I) "Any problems with these configs? / health?"  1. health_checks -> the answer. STOP.
+J) "List devices / what vendor/OS is X / interfaces?"  1. node_properties -> answer. STOP.
+K) "Who owns IP X / which device has it?"  1. ip_owners {ips:X} -> answer. STOP.
+L) "BGP neighbor config / peer AS / policy?"  1. bgp_peer_config -> answer.
+   (up/down status uses bgp_session_status — recipe D.) STOP.
+M) "Which ACL lines match this traffic?"  1. find_matching_filter_lines {headers:{...}}
+   -> matching lines are the answer. (single PERMIT/DENY for ONE flow = test_filter.) STOP.
+
+CLARIFY A MISSING REQUIRED PARAMETER before calling a check: if the question is
+missing an essential and you cannot infer it from the DEVICE INVENTORY, ask ONE
+short plain-text question instead of guessing. Essentials: reachability -> source
++ destination (host IP/device; a vague "the internet" needs a concrete IP); ACL
+-> the flow (dest IP + port/proto); routes -> a prefix; route-policy -> prefix +
+direction; ip_owners -> the IP. NEVER invent a source/dest/prefix/device the user
+didn't give and the inventory doesn't contain.
 
 KEY RULES:
 - FAILURES: your FIRST call MUST be apply_failure_set whenever the user

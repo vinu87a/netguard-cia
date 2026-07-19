@@ -226,6 +226,22 @@ H) "Validate this config edit / what did it change?"  [CHANGE]
 I) "Any problems with these configs? / health?"  [read-only]
    1. health_checks  -> the bundle IS the answer. STOP.
 
+J) "List the devices / what vendor/OS is X / how many interfaces?"  [read-only]
+   1. node_properties (optional nodes to scope)  -> the inventory IS the answer.
+   STOP.
+
+K) "Who owns IP X? / which device has this address?"  [read-only]
+   1. ip_owners {ips: X}  -> the owning device/interface IS the answer. STOP.
+
+L) "Show the BGP neighbor config / what's the peer AS / import-export policy?"  [read-only]
+   1. bgp_peer_config (optional nodes)  -> the peer settings ARE the answer.
+   (For up/down status use bgp_session_status instead — recipe D.) STOP.
+
+M) "Which ACL lines match this traffic (SSH to X, etc.)?"  [read-only]
+   1. find_matching_filter_lines {headers:{...}, optional action, filters, nodes}
+      -> the matching lines ARE the answer. (For a single PERMIT/DENY decision on
+      ONE flow, use test_filter — recipe A.) STOP.
+
 CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
 - SCOPE TO THE QUESTION: run the FEWEST checks that answer what was actually
   asked, then reply READY FOR SYNTHESIS. A read-only lookup ("does this ACL
@@ -233,6 +249,22 @@ CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
   checks — do NOT run a full battery (loops, multipath, differential, prefix
   propagation, route lookups across every node) for a simple question. Save the
   broad investigation for actual failure/change scenarios.
+- CLARIFY A MISSING REQUIRED PARAMETER (do this BEFORE calling a check): each
+  recipe needs certain facts to run. If the question is missing one and you
+  cannot infer it from the DEVICE INVENTORY, ask ONE short clarifying question
+  in plain text (no JSON) instead of guessing. The essentials:
+    · reachability / "can X reach Y" -> a SOURCE and a DESTINATION (host IP or a
+      device that exists); a vague destination ("the internet", "outside") needs
+      a concrete IP.
+    · ACL "permit/deny" / matching lines -> the specific flow (at least a
+      destination IP and port/proto); which ACL/device if several exist.
+    · routes / RIB -> a PREFIX.
+    · route-policy -> the announcement (a prefix) and direction (in/out).
+    · BGP/OSPF "why is it down" -> which peering/pair (or "all").
+    · ip_owners -> the IP to look up.
+  Do NOT invent a source, destination, prefix, or device that the user did not
+  give and the inventory does not contain. One targeted question beats a
+  confidently wrong answer.
 - FAILURES (single or stacked): your FIRST check MUST be apply_failure_set
   whenever the user fails / shuts / downs a node, link, or interface. It is the
   ONLY action that records the failure in the session state and creates the
