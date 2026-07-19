@@ -150,6 +150,15 @@ carries each one's exact argument schema; use these names verbatim):
   - filter_line_reachability — shadowed/dead ACL lines.
   - network_analyze_acl_rules — coarse ACL content/shadow analysis.
 
+  Inventory & descriptive Q&A (read-only):
+  - node_properties — device inventory: vendor, config format, VRFs, interfaces
+    per device ("list the devices", "what OS is X").
+  - ip_owners(ips) — which device/interface OWNS an IP ("who has 10.0.0.1?").
+  - bgp_peer_config — BGP neighbor CONFIG (AS, update-source, policies) — the
+    settings behind a peering, distinct from bgp_session_status (up/down).
+  - find_matching_filter_lines(headers) — ALL ACL lines matching a packet space
+    ("which rules apply to SSH to X?"), vs test_filter's single deciding line.
+
   Health, hygiene & info:
   - health_checks — bundle: init issues, undefined refs, dup IPs, BGP sessions,
     loops, unused structures, parse warnings.
@@ -454,12 +463,14 @@ differential_query, snapshot_gates, test_route_policy, search_route_policy,
 test_filter, search_filter, compare_filters, filter_line_reachability,
 bgp_compatibility, bgp_rib, bgp_edges, prefix_tracer, ospf_compatibility,
 ospf_edges, ospf_process_config, multipath_consistency, reachability_search,
+node_properties, ip_owners, bgp_peer_config, find_matching_filter_lines,
 batfish_*, network_*), the words
 "Batfish"/"engine"/"MCP", or internal state names (fail1, change1, base). Use:
 failure simulation, path trace, traffic simulation, two-way reachability check,
 BGP session check, BGP compatibility check, BGP route table, BGP adjacencies,
 prefix propagation trace, OSPF compatibility check, OSPF adjacencies, OSPF
-process check, ECMP consistency check, reachability proof, before/after comparison, before/after diff, health gates, loop
+process check, ECMP consistency check, reachability proof, device inventory,
+IP owner lookup, BGP peer config, ACL matching lines, before/after comparison, before/after diff, health gates, loop
 check, route-table lookup, routing-policy test, routing-policy search, ACL flow
 test, ACL flow search, ACL before/after comparison, ACL dead-line check,
 configuration health check, configuration change. Refer to states as "the

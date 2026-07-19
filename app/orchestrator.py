@@ -792,6 +792,80 @@ TRANSLATOR_TOOLS = [
         },
     },
     {
+        "name": "node_properties",
+        "description": (
+            "Device INVENTORY / configuration settings — vendor & config format, "
+            "VRFs, interfaces per device. Use for 'list the devices', 'what "
+            "vendor/OS is X', 'how many interfaces does X have'. Optional nodes "
+            "(name/regex) and properties (comma-separated column names) narrow it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string", "description": "optional node specifier"},
+                "properties": {"type": "string",
+                                "description": "optional comma-separated columns"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "ip_owners",
+        "description": (
+            "Which device / interface / VRF OWNS an IP address — answers 'who "
+            "has 10.0.0.1?' or 'which device owns this loopback?'. `ips` filters "
+            "to specific IP(s); omit for the full IP-to-owner map."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ips": {"type": "string", "description": "e.g. 10.0.0.1"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "bgp_peer_config",
+        "description": (
+            "BGP neighbor CONFIGURATION per peering (local/remote AS + IP, update "
+            "source, import/export policies, address families) — the settings "
+            "behind a peering, distinct from bgp_session_status (up/down). Use for "
+            "'show the BGP neighbor config' / 'what's the peer AS / policy'. "
+            "Optional nodes and properties."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "string"},
+                "properties": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
+        "name": "find_matching_filter_lines",
+        "description": (
+            "Which ACL/filter LINES match packets in a header space — answers "
+            "'which rules apply to this traffic?' or 'what lines match SSH to "
+            "X?'. headers narrow the packet space (srcIps, dstIps, dstPorts, "
+            "ipProtocols); optional action ('permit'|'deny'), filters, nodes. "
+            "Different from test_filter (which gives the single deciding line for "
+            "ONE flow) — this lists ALL matching lines across a space."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "headers": {"type": "object",
+                             "description": "packet space, e.g. {\"dstPorts\": "
+                             "\"22\", \"ipProtocols\": [\"tcp\"]}"},
+                "action": {"type": "string", "enum": ["permit", "deny"]},
+                "filters": {"type": "string"},
+                "nodes": {"type": "string"},
+                "snapshot": _snapshot_prop(),
+            },
+        },
+    },
+    {
         "name": "read_config",
         "description": "Read the CURRENT (post-edits) config text for one device "
                        "file, so edits can be expressed precisely.",
@@ -1162,6 +1236,22 @@ def _execute_translator_tool(ops: BatfishOps, ledger: Ledger,
     if name == "ospf_process_config":
         return _truncate(_ENGINE.ospf_process_config(
             net, snap, nodes=_normalize_node_spec(args.get("nodes"))))
+    if name == "node_properties":
+        return _truncate(_ENGINE.node_properties(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            properties=args.get("properties")))
+    if name == "ip_owners":
+        return _truncate(_ENGINE.ip_owners(net, snap, ips=args.get("ips")))
+    if name == "bgp_peer_config":
+        return _truncate(_ENGINE.bgp_peer_config(
+            net, snap, nodes=_normalize_node_spec(args.get("nodes")),
+            properties=args.get("properties")))
+    if name == "find_matching_filter_lines":
+        return _truncate(_ENGINE.find_matching_filter_lines(
+            net, snap, headers=args.get("headers"),
+            filters=args.get("filters"),
+            nodes=_normalize_node_spec(args.get("nodes")),
+            action=args.get("action")))
     if name == "detect_loops":
         return _truncate(_ENGINE.detect_loops(net, snap))
     if name == "multipath_consistency":

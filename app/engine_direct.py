@@ -218,6 +218,70 @@ class DirectEngine:
         df = bf.q.ospfProcessConfiguration(**kw).answer().frame()
         return {"process_count": int(len(df)), "processes": _records(df)}
 
+    # -- inventory & descriptive Q&A (Phase 5) ----------------------------------
+    def node_properties(self, network: str, snapshot: str,
+                        nodes: str | None = None,
+                        properties: str | None = None) -> dict:
+        """Device inventory / configuration settings per node (vendor, config
+        format, VRFs, interfaces, domain, etc.). `properties` narrows the columns
+        (comma-separated), `nodes` narrows the devices."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        # default to a compact inventory subset — nodeProperties has ~100 columns
+        kw["properties"] = properties or "Configuration_Format,VRFs,Interfaces"
+        df = bf.q.nodeProperties(**kw).answer().frame()
+        return {"node_count": int(len(df)), "nodes": _records(df)}
+
+    def ip_owners(self, network: str, snapshot: str,
+                  ips: str | None = None) -> dict:
+        """Which device/interface/VRF OWNS an IP address (answers 'who has
+        10.0.0.1?'). `ips` filters to specific IP(s); omit for the full map."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if ips:
+            kw["ips"] = ips
+        df = bf.q.ipOwners(**kw).answer().frame()
+        return {"owner_count": int(len(df)), "owners": _records(df)}
+
+    def bgp_peer_config(self, network: str, snapshot: str,
+                        nodes: str | None = None,
+                        properties: str | None = None) -> dict:
+        """BGP neighbor CONFIGURATION per peering (local/remote AS + IP, update
+        source, import/export policies, address families) — the settings behind
+        a session, distinct from its up/down status."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if nodes:
+            kw["nodes"] = nodes
+        if properties:
+            kw["properties"] = properties
+        df = bf.q.bgpPeerConfiguration(**kw).answer().frame()
+        return {"peer_count": int(len(df)), "peers": _records(df)}
+
+    def find_matching_filter_lines(self, network: str, snapshot: str,
+                                   headers: dict | None = None,
+                                   filters: str | None = None,
+                                   nodes: str | None = None,
+                                   action: str | None = None) -> dict:
+        """Which ACL/filter LINES match any packet in the given header space —
+        answers 'which rules apply to this traffic?'. Optional headers narrow the
+        packet space; action ('permit'|'deny') narrows to matching lines with
+        that action."""
+        bf = self._session(network, snapshot)
+        kw: dict[str, Any] = {}
+        if headers:
+            kw["headers"] = self._headers(headers)
+        if filters:
+            kw["filters"] = filters
+        if nodes:
+            kw["nodes"] = nodes
+        if action:
+            kw["action"] = action
+        df = bf.q.findMatchingFilterLines(**kw).answer().frame()
+        return {"match_count": int(len(df)), "matches": _records(df)}
+
     # -- native diff: what did the change break --------------------------------
     def differential_reachability(self, network: str, snapshot: str,
                                   reference_snapshot: str) -> dict:

@@ -175,6 +175,10 @@ FRIENDLY_CHECK = {
     "ospf_process_config": "OSPF process check",
     "multipath_consistency": "ECMP consistency check",
     "reachability_search": "Reachability proof",
+    "node_properties": "Device inventory",
+    "ip_owners": "IP owner lookup",
+    "bgp_peer_config": "BGP peer config",
+    "find_matching_filter_lines": "ACL matching lines",
 }
 def _loads(result: str):
     try:
@@ -314,6 +318,22 @@ def facts_rows(tool_log: list[dict]) -> list[dict]:
             outcome = (f"{n} example flows"
                        + (" (intent proven — none found)" if n == 0 else
                           " (counterexamples exist)"))
+        elif tool == "node_properties" and isinstance(r, dict):
+            target = "device inventory" + (f" ({args['nodes']})" if args.get("nodes") else "")
+            outcome = f"{r.get('node_count', '?')} devices"
+        elif tool == "ip_owners" and isinstance(r, dict):
+            target = f"owner of {args.get('ips', 'all IPs')}"
+            owners = r.get("owners") or []
+            outcome = (f"{r.get('owner_count', '?')} owner(s)"
+                       + (f" | {owners[0].get('Node')} {owners[0].get('Interface')}"
+                          if owners else ""))
+        elif tool == "bgp_peer_config" and isinstance(r, dict):
+            target = "BGP peer configuration"
+            outcome = f"{r.get('peer_count', '?')} peerings"
+        elif tool == "find_matching_filter_lines" and isinstance(r, dict):
+            h = args.get("headers", {})
+            target = f"{h.get('dstIps', 'any')}:{h.get('dstPorts', 'any')}/{h.get('ipProtocols', 'any')}"
+            outcome = f"{r.get('match_count', '?')} matching ACL lines"
         elif tool == "batfish_check_routing" and isinstance(r, dict):
             target = f"protocols {args.get('protocols')}"
             outcome = f"process check {r.get('overall', '?')}"
