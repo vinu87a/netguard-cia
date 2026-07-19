@@ -47,15 +47,12 @@ _load_dotenv()
 # the synthesizer payload are sent in full. Only a loop backstop remains, to
 # prevent a runaway tool-calling loop (not a context limit).
 MAX_TRANSLATOR_ITERATIONS = 40
-# Verify -> remediate -> re-verify: how many times the verifier may send the
-# translator back for missing checks before the verdict proceeds with a floor.
-# A read-only QUERY needs far less — it has an answer, not a change to stress-test.
-MAX_VERIFY_CYCLES = 5
-MAX_VERIFY_CYCLES_QUERY = 1
 
 # Minimal per-message output-format reminders. The domain rules live in the
 # worker/sub-agent prompts; these only restate the OUTPUT SHAPE, which this
 # platform's models won't reliably honor from the system prompt alone.
+# (The verifier is now deterministic — see _deterministic_verify — so there is
+# no verifier LLM call and no verifier format hint.)
 _TRANSLATOR_FORMAT = (
     'To run a check, reply with EXACTLY ONE JSON object and nothing else:\n'
     '{"tool": "<check name from AVAILABLE CHECKS>", "args": { ...exactly the '
@@ -64,12 +61,6 @@ _TRANSLATOR_FORMAT = (
     '"node_failures" and "interface_failures" arrays of strings; interfaces '
     'as "node[Interface]"). One check per reply. When the investigation is '
     'complete, reply in plain text beginning with the line: READY FOR SYNTHESIS'
-)
-_VERIFIER_FORMAT = (
-    'Reply with EXACTLY ONE JSON object and nothing else:\n'
-    '{"complete": true|false, "missing_probes": [...], "concerns": [...], '
-    '"recommended_floor": "GO"|"GO-WITH-CONDITIONS"|"NO-GO"|'
-    '"INSUFFICIENT-DATA"|null}'
 )
 # CHANGE scenarios (a failure/edit was applied) get a Go/No-Go verdict; read-only
 # QUERY scenarios get a direct answer instead — a verdict would be a category
@@ -1367,44 +1358,73 @@ def _translator_context(ledger: Ledger) -> str:
     )
 
 
-_VERIFIER_QUERY_SCOPE = (
-    "\n\n## OUTPUT MODE: QUERY (read-only)\n"
-    "This is a read-only QUESTION — nothing was changed. Judge ONLY whether a "
-    "check directly answers the user's SPECIFIC question. Do NOT ask for "
-    "before/after comparisons, failover, loop checks, blast-radius, or "
-    "multi-vantage probes unless the question itself is about them. If a relevant "
-    "check already answers the question, return complete=true.")
+def _loads_result(s):
+    try:
+        return json.loads(s)
+    except (TypeError, ValueError):
+        return None
 
 
-def _run_verifier(provider, ledger: Ledger, user_text: str, engine_facts: str,
-                  notify, mode: str = "change") -> dict | None:
-    """Independent completeness/soundness review. Returns the parsed JSON dict,
-    or None if the verifier could not be run or parsed (never fatal — the
-    deterministic guards are the hard floor)."""
-    notify("Verifying investigation")
-    data = (f"## USER QUESTION\n{user_text}\n\n## SESSION STATE\n"
-            f"{json.dumps(ledger.to_public_dict())}\n\n"
-            f"## CHECKS RUN AND RESULTS\n{engine_facts}")
-    if mode == "query":
-        data += _VERIFIER_QUERY_SCOPE
-    try:
-        reply = provider.chat([{"role": "user", "content": data}], role="VERIFIER", format_hint=_VERIFIER_FORMAT)
-    except Exception:
-        return None
-    text = reply.content.strip()
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) and "complete" in obj else None
-    except (json.JSONDecodeError, ValueError):
-        return None
+def _deterministic_verify(tool_log: list[dict]) -> dict:
+    """Deterministic completeness/soundness review of a CHANGE investigation —
+    the code equivalent of the old LLM verifier's COMPLETENESS BAR, computed from
+    the evidence. No extra LLM round-trip, no churn, fully predictable. Returns
+    the same shape the synthesizer already consumes:
+    {complete, missing_probes, concerns, recommended_floor}.
+
+    Bar: a specific-flow reachability probe exists, a before/after comparison
+    exists, and a loop check exists. Plus the one genuinely valuable soundness
+    rule — a NEGATIVE reachability result seen from only ONE source must be
+    corroborated from a second/interior device, else the verdict floors at
+    INSUFFICIENT-DATA (guards the documented 'judge only from the failed device'
+    bug). Also floors on a blast-radius-vs-path-trace conflict."""
+    ok = [e for e in tool_log if not e.get("is_error")]
+    names = {e["tool"] for e in ok}
+    missing: list[str] = []
+    concerns: list[str] = []
+    floor = None
+
+    if not (names & _PROBE_TOOLS):
+        missing.append("a path trace / traffic simulation for the specific flow "
+                       "the user asked about")
+    if not ({"differential_reachability", "differential_query"} & names):
+        missing.append("a before/after comparison versus the original network")
+    if "detect_loops" not in names:
+        missing.append("a forwarding-loop check on the changed network")
+
+    # multi-vantage on a NEGATIVE path trace (the vantage-point safeguard)
+    traces = [e for e in ok if e["tool"] == "network_traceroute"]
+
+    def _negative(e):
+        r = _loads_result(e.get("result"))
+        return (isinstance(r, dict) and (r.get("trace_count") or 0) > 0
+                and (r.get("accepted") or 0) == 0)
+
+    negatives = [e for e in traces if _negative(e)]
+    sources = {str((e.get("input") or {}).get("source_location")) for e in traces}
+    if negatives and len(sources) <= 1:
+        concerns.append("the only reachability FAILURE was seen from a single "
+                        "source (often the modified device) — a local outlier")
+        missing.append("a path trace for the same flow from a SECOND / interior "
+                       "device to corroborate the failure")
+        floor = "INSUFFICIENT-DATA"
+
+    # conflict: blast-radius says NO_IMPACT but a path trace shows a failure
+    def _no_impact(e):
+        r = _loads_result(e.get("result"))
+        return isinstance(r, dict) and "NO_IMPACT" in str(r.get("overall", "")).upper()
+    if negatives and any(_no_impact(e) for e in ok if e["tool"] == "batfish_failure_impact"):
+        concerns.append("blast-radius reports NO_IMPACT but a path trace shows a "
+                        "failure — the evidence conflicts")
+        floor = "INSUFFICIENT-DATA"
+
+    return {"complete": not missing, "missing_probes": missing,
+            "concerns": concerns, "recommended_floor": floor}
 
 
 _CHANGE_TOOLS = {"apply_failure_set", "stage_change_snapshot"}
 _PROBE_TOOLS = {"network_traceroute", "batfish_simulate_traffic",
-                "network_bidirectional_reachability"}
+                "network_bidirectional_reachability", "reachability_search"}
 
 
 def _needs_probe_nudge(tool_log: list[dict]) -> bool:
@@ -1482,14 +1502,6 @@ def _checks_run_summary(tool_log: list[dict]) -> str:
 
 _CHECKS_RUN_HEADER = ("\n\n## CHECKS ALREADY RUN (this question) — authoritative; "
                       "trust this list over memory, do NOT repeat these:\n")
-
-
-def _norm_probes(missing) -> tuple:
-    """Order-insensitive, case-insensitive key for a verifier's missing_probes,
-    so the loop can detect when the verifier is repeating the same asks."""
-    if not missing:
-        return ()
-    return tuple(sorted(str(m).strip().lower() for m in missing))
 
 
 def _append_checks_recap(messages: list[dict], tool_log: list[dict]) -> None:
@@ -1641,55 +1653,25 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         except Exception as e:  # gates are a floor, never a turn-killer
             notify(f"Health gates could not run ({type(e).__name__})")
 
-    # ---- bounded verify -> remediate -> re-verify loop -------------------
-    # The verifier is an adversarial second opinion. When it reports gaps, feed
-    # the missing checks back to the translator and verify again — up to
-    # MAX_VERIFY_CYCLES times. If still incomplete, proceed with the verifier's
-    # recommended_floor (typically INSUFFICIENT-DATA). Deterministic guards
-    # remain the hard floor underneath this.
-    # Read-only QUERY turns SKIP the verifier entirely: it is an adversarial
-    # CHANGE-verdict reviewer, and each worker round-trip costs ~80s — not worth
-    # it for a simple lookup, where the single relevant check already answers.
-    verify_cap = MAX_VERIFY_CYCLES
+    # ---- deterministic completeness/soundness review --------------------
+    # No LLM verifier: "is the evidence sufficient?" is a checklist over the
+    # tool_log (the old COMPLETENESS BAR, promoted to code — zero LLM round-trips,
+    # zero churn, fully predictable). Change turns only; a read-only query is
+    # answered by its single relevant check. If something is genuinely missing,
+    # nudge the translator ONCE (deterministically), then re-check.
     verifier_notes = None
-    prev_missing = None
-    for cycle in range(verify_cap + 1):
-        if mode != "change":
-            break
-        engine_facts = json.dumps(tool_log, indent=1, default=str)
-        verifier_notes = _run_verifier(provider, ledger, user_text,
-                                       engine_facts, notify, mode=mode)
-        missing = (verifier_notes or {}).get("missing_probes")
-        if not verifier_notes or not missing:
-            break  # verifier satisfied (or unavailable) — done
-        # CONVERGENCE GUARD: if the verifier repeats the same asks it made last
-        # cycle, remediation isn't satisfying it — stop churning verifier calls.
-        missing_key = _norm_probes(missing)
-        if missing_key == prev_missing:
-            notify("Verifier is repeating the same gaps — proceeding with a "
-                   "capped result")
-            break
-        prev_missing = missing_key
-        if cycle >= verify_cap:
-            notify(f"Verifier still flags gaps after {verify_cap} "
-                   "cycle(s) — proceeding with a capped result")
-            break
-        notify(f"Verifier flagged gaps (cycle {cycle + 1}/{verify_cap}) "
-               "— gathering more evidence")
-        messages.append({"role": "user", "content": (
-            "VERIFIER found the investigation incomplete. Missing: "
-            + json.dumps(missing) + ". Run exactly these checks now (e.g. "
-            "traceroute from an interior device, differential_reachability, "
-            "detect_loops as applicable), then reply READY FOR SYNTHESIS."
-            + _CHECKS_RUN_HEADER + _checks_run_summary(tool_log))})
-        n_before = len(tool_log)
-        _translator_rounds(provider, ops, ledger, messages, tool_log, notify)
-        # PROGRESS GUARD: if remediation gathered no new check, re-verifying will
-        # only repeat the same gap — stop and let the floor apply.
-        if len(tool_log) == n_before:
-            notify("No new checks could be gathered — proceeding with a capped "
-                   "result")
-            break
+    if mode == "change":
+        verifier_notes = _deterministic_verify(tool_log)
+        if verifier_notes["missing_probes"]:
+            notify("Gathering additional evidence")
+            missing_list = "\n".join(f"- {m}" for m in verifier_notes["missing_probes"])
+            messages.append({"role": "user", "content": (
+                "COMPLETENESS: a sound verdict still needs ONLY the following — "
+                "run exactly these (nothing more), then reply READY FOR "
+                f"SYNTHESIS:\n{missing_list}"
+                + _CHECKS_RUN_HEADER + _checks_run_summary(tool_log))})
+            _translator_rounds(provider, ops, ledger, messages, tool_log, notify)
+            verifier_notes = _deterministic_verify(tool_log)  # re-check once
 
     engine_facts = json.dumps(tool_log, indent=1, default=str)
 

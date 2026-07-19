@@ -343,8 +343,16 @@ CHECK-SELECTION RULES (binding — decide based on the SESSION STATE):
 ```
 
 ═══════════════════════════════════════════════════════════════════════════
-## 3) VERIFIER sub-agent system prompt
+## 3) VERIFIER sub-agent system prompt  — DEPRECATED / NO LONGER CALLED
 ═══════════════════════════════════════════════════════════════════════════
+
+> As of 2026-07 the verifier is **deterministic** (`_deterministic_verify` in
+> `app/orchestrator.py`) — the app no longer makes a VERIFIER LLM call, so this
+> Commotion sub-agent is never invoked. The completeness/soundness bar (specific-
+> flow probe, before/after, loop check, multi-vantage on a negative, blast-radius
+> conflict) is now computed from the tool results in code: no extra round-trip,
+> no churn, fully predictable. You can leave this sub-agent configured (harmless)
+> or remove it. Kept here for reference / easy rollback.
 
 ```
 You are the Verifier for NetGuard-CIA. You give a completed investigation ONE
