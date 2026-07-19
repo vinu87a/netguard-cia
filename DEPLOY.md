@@ -1,6 +1,19 @@
 # Deploying NetGuard-CIA on Rocky Linux
 
+NetGuard-CIA is a Streamlit chat app over the Batfish engine: it answers network
+change-impact "what-ifs" with a Go/No-Go verdict **and** read-only questions
+(reachability, ACL/BGP/OSPF, device inventory, IP ownership) with a direct
+answer. See the [README](README.md) for what it does; this file is the
+server-deployment runbook.
+
 Tested target: **Rocky Linux 9** (x86_64). Notes for Rocky 8 are called out inline.
+
+> This runbook is complete for the current build. The app's analysis tooling
+> (incl. the Phase-5 inventory/Q&A tools — `node_properties`, `ip_owners`,
+> `bgp_peer_config`, `find_matching_filter_lines`) adds **no new OS packages,
+> Python deps, ports, or containers** — it's all the pinned `requirements.txt`
+> and the same two-container stack. A `git pull` + `systemctl restart netguard`
+> picks up new tools; no deployment changes needed.
 
 > RHEL-family gotchas this guide handles explicitly: SELinux blocking the
 > container bind-mount, the `podman-docker` shim shadowing `docker`, Python 3.9

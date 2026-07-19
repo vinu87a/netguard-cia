@@ -8,15 +8,30 @@
 by deterministic analysis — not LLM guesswork.**
 
 NetGuard-CIA is a chat application for network engineers. Upload your device
-configurations (Cisco IOS / Juniper Junos), then ask questions like:
+configurations (Cisco IOS / Juniper Junos), then ask two kinds of question:
+
+**Change scenarios** — "what if I…" — get a Go/No-Go **verdict**:
 
 > *"What breaks if I shut the link between as1border1 and as2border1?"*
 > *"Now also fail the backup link — can AS1 still reach 2.128.0.0/16?"*
-> *"Are there any problems with the current configs?"*
+> *"Is this ACL change safe?"*
 
-Every answer is a structured **verdict** (GO / GO-WITH-CONDITIONS / NO-GO /
-INSUFFICIENT-DATA) with the verified facts, the checks that were run, a
-rollback plan, and before/after topology diagrams.
+**Read-only questions** about the network as it is — get a direct **answer**:
+
+> *"Can host 10.10.10.1 reach the DNS server on UDP 53 through acl_in?"*
+> *"Which device owns 2.1.3.2?"  ·  "List the devices and their vendors."*
+> *"Why is the BGP session on as1border1 down?"  ·  "Are there any config problems?"*
+
+The app **classifies each turn automatically**: a change scenario returns a
+structured **VERDICT** (GO / GO-WITH-CONDITIONS / NO-GO / INSUFFICIENT-DATA) with
+verified facts, the checks run, a rollback plan, and before/after topology
+diagrams; a read-only question returns a direct **ANSWER** with its evidence — no
+Go/No-Go, because nothing is being approved.
+
+Under the hood it drives ~37 deterministic Batfish analyses spanning reachability
+and path analysis, routing and BGP/OSPF, ACL/firewall and route-policy behavior,
+failure simulation and change diffing, engine health assertions, and network
+inventory (device properties, IP ownership, peer config).
 
 ## The one principle
 
@@ -30,10 +45,12 @@ significance) — and confidence is capped by the weakest link in that chain.
 
 ## What it looks like
 
-- **Verdict banner** — color-coded GO ✅ / conditions ⚠️ / NO-GO ⛔ headline
-- **Verdict at a glance** — confidence, impacted services, packet flow, rollback
+- **Verdict / answer banner** — color-coded GO ✅ / conditions ⚠️ / NO-GO ⛔ for
+  change scenarios; OK / Attention for read-only questions
+- **At a glance** — for a change: confidence, impacted services, packet flow,
+  rollback; for a query: the answer, status, and evidence
 - **Network checks performed** — every analysis run, its target, and its result
-- **Findings & full verdict** — the evidence base and the tagged reasoning
+- **Findings & full response** — the evidence base and the tagged reasoning
 - **Topology diagrams** — your network on upload; before/after side-by-side
   when a change is simulated (lost links dashed red, failed devices red)
 - **Session state** — a running timeline of simulated failures and config
@@ -45,8 +62,8 @@ significance) — and confidence is capped by the weakest link in that chain.
 ┌───────────────────────────────────────────┐
 │  Streamlit chat UI  (app/)                │  upload configs, ask scenarios
 └───────────────┬───────────────────────────┘
-                │  LLM translator + synthesizer (Ollama Cloud,
-                │  OpenAI-compatible API — prompts in prompts/)
+                │  LLM translator + verifier + synthesizer
+                │  (Commotion or Ollama — swap via NETGUARD_LLM_PROVIDER)
 ┌───────────────▼───────────────────────────┐
 │  Batfish MCP server (docker, port 3009)   │  snapshot mgmt + analysis tools
 │  + direct pybatfish access (port 9996)    │  sessions, diffs, forks, loops
@@ -179,8 +196,15 @@ CLAUDE.md               project brief + build log (for AI-assisted development)
 ## Design guarantees
 
 - **Parse gate** — no verdict is produced on a half-parsed config set.
+- **Right output for the question** — a change scenario gets a Go/No-Go verdict;
+  a read-only question gets a direct answer (never a spurious "GO" for a lookup).
+  The classifier is deterministic — it keys on whether the turn actually mutated
+  the network, not on the LLM's guess.
 - **Two-zone answers** — verified findings are always visually separate from
   judgment, and every reasoning step carries a provenance tag.
+- **Bad tool args never reach the engine** — a pre-flight validator plus
+  arg-coercion bounce malformed analysis calls back for correction instead of
+  crashing (or wedging) the engine.
 - **Mandatory residual-unknowns** — config-only analysis cannot see live
   utilization, real-time session state, convergence timing, or hardware faults;
   every verdict says so.
