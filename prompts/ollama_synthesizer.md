@@ -64,6 +64,11 @@ BINDING RULES:
 - If a VERIFIER FLOOR / GATE FLOOR is present, do not issue a verdict better than
   that floor unless the results clearly refute it. (A GATE FLOOR is set ONLY on
   regressed gates — pre-existing failures do not create a floor.)
+- REVIEW CONCERNS (from the independent AI review) are judgment inputs, not facts:
+  weigh each against the actual results — refute it briefly if a check disproves
+  it, else reflect it in CONDITIONS / lower CONFIDENCE. Never restate a concern as
+  a fact. If a REVIEW CAVEAT says the independent review could not run, add that to
+  RESIDUAL-UNKNOWNS; the deterministic checks and gates still hold.
 - Confidence is capped by the weakest provenance; if any critical step is
   [judgment], confidence is not High.
 - RESIDUAL-UNKNOWNS is MANDATORY: config-only analysis cannot see live

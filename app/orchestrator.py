@@ -51,8 +51,9 @@ MAX_TRANSLATOR_ITERATIONS = 40
 # Minimal per-message output-format reminders. The domain rules live in the
 # worker/sub-agent prompts; these only restate the OUTPUT SHAPE, which this
 # platform's models won't reliably honor from the system prompt alone.
-# (The verifier is now deterministic — see _deterministic_verify — so there is
-# no verifier LLM call and no verifier format hint.)
+# Verify is three layers (change turns): gate floor + _deterministic_verify
+# (Layer 2, code checklist) + _advisory_verify (Layer 3, TIGHTEN-ONLY LLM,
+# format hint below). Each can only make the verdict more conservative.
 _TRANSLATOR_FORMAT = (
     'To run a check, reply with EXACTLY ONE JSON object and nothing else:\n'
     '{"tool": "<check name from AVAILABLE CHECKS>", "args": { ...exactly the '
@@ -85,6 +86,23 @@ _SYNTHESIZER_FORMAT_QUERY = (
     'Answer only what was asked — do not bring in unrelated findings. Use '
     'ATTENTION only if the answer surfaces a real problem. Plain language only — '
     'no internal check names, no "Batfish", no snapshot IDs.'
+)
+# The advisory verifier is TIGHTEN-ONLY: it may raise a soundness concern and,
+# at most, recommend a MORE conservative floor. It can never clear a verdict
+# (GO) nor assert a break (NO-GO — that is an engine-only fact). One shot, no
+# re-investigation.
+_VERIFIER_FORMAT = (
+    'You are an ADVISORY reviewer. You cannot run or request more checks, and '
+    'you never state a network fact of your own. Judge only whether the '
+    'evidence already gathered is SOUND and SUFFICIENT for the user\'s specific '
+    'question. Reply with EXACTLY ONE JSON object and nothing else:\n'
+    '{"concerns": ["<specific, decision-relevant soundness gap>", ...], '
+    '"recommended_floor": "GO-WITH-CONDITIONS" | "INSUFFICIENT-DATA" | null}\n'
+    'Bias hard toward null and an empty concerns list — the engine and a '
+    'deterministic review already ran; speak up ONLY when a real gap or a '
+    'conflict in the results would change the verdict. recommended_floor may be '
+    'at most INSUFFICIENT-DATA — never "GO" (you cannot approve) and never '
+    '"NO-GO" (only the engine gates may assert a break).'
 )
 
 
@@ -357,8 +375,13 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "network_bidirectional_reachability",
-        "description": "Both-direction reachability between two locations — catches "
-                       "asymmetric routing and one-way blocks.",
+        "description": (
+            "Both-direction reachability between two locations — catches "
+            "asymmetric routing and one-way blocks (return path filtered or "
+            "black-holed while the forward path works). Use when a change "
+            "touches return-path routing or a stateful firewall/ACL; for a "
+            "single direction use network_traceroute."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -375,8 +398,14 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "network_analyze_acl_rules",
-        "description": "ACL/filter behavior analysis: matching lines, shadowed rules, "
-                       "reachability of filter lines. Optionally scope to one ACL.",
+        "description": (
+            "Broad ACL/filter behavior overview: matching lines, shadowed "
+            "rules, reachability of filter lines. Optionally scope to one ACL. "
+            "Use for a general 'analyze this ACL' pass; for a specific question "
+            "prefer test_filter (permit/deny of ONE flow), "
+            "find_matching_filter_lines (which lines match a header space), or "
+            "filter_line_reachability (dead/shadowed lines only)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -387,7 +416,12 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "get_snapshot_info",
-        "description": "Device/interface inventory and model summary for a snapshot.",
+        "description": (
+            "Snapshot-level summary: device/interface counts and model "
+            "metadata — a quick 'what's in this snapshot' overview. For "
+            "per-device vendor/OS/VRF/interface detail or 'list the devices', "
+            "use node_properties instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"snapshot": _snapshot_prop()},
@@ -452,8 +486,12 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "routes_to",
-        "description": "Main-RIB routes matching a prefix (optionally scoped to "
-                       "nodes) — shows what actually got SELECTED into the RIB.",
+        "description": (
+            "Main-RIB routes matching a prefix (optionally scoped to nodes) — "
+            "what actually got SELECTED into the RIB, across all protocols. For "
+            "BGP-learned routes BEFORE best-path selection use bgp_rib; to trace "
+            "how a prefix propagates hop-by-hop use prefix_tracer."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -664,8 +702,12 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "bgp_edges",
-        "description": "Established BGP adjacencies (who peers with whom). "
-                       "Optional nodes / remote_nodes scope.",
+        "description": (
+            "Established BGP adjacencies (who peers with whom) — maps the BGP "
+            "topology. For whether a session is UP use bgp_session_status; for "
+            "WHY a peering won't come up use bgp_compatibility. Optional nodes / "
+            "remote_nodes scope."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -711,8 +753,12 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "ospf_edges",
-        "description": "Established OSPF adjacencies. Optional nodes / "
-                       "remote_nodes scope.",
+        "description": (
+            "Established OSPF adjacencies (who is neighbors with whom) — maps "
+            "the OSPF topology. For WHY a neighbor pair won't form (area / "
+            "network-type / MTU / timer mismatch) use ospf_compatibility. "
+            "Optional nodes / remote_nodes scope."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -724,8 +770,13 @@ TRANSLATOR_TOOLS = [
     },
     {
         "name": "ospf_process_config",
-        "description": "OSPF process configuration (router-id, areas, reference "
-                       "bandwidth). Optional nodes scope.",
+        "description": (
+            "OSPF process configuration (router-id, areas, reference "
+            "bandwidth). Use to inspect the settings behind an adjacency "
+            "question — e.g. duplicate router-ids, or an area / reference-"
+            "bandwidth mismatch that ospf_compatibility flagged. Optional nodes "
+            "scope."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1365,25 +1416,53 @@ def _loads_result(s):
         return None
 
 
-def _deterministic_verify(tool_log: list[dict]) -> dict:
-    """Deterministic completeness/soundness review of a CHANGE investigation —
-    the code equivalent of the old LLM verifier's COMPLETENESS BAR, computed from
-    the evidence. No extra LLM round-trip, no churn, fully predictable. Returns
-    the same shape the synthesizer already consumes:
+# Dispositions that mean the packet was successfully handled by the network.
+# Note EXITS_NETWORK / DELIVERED_TO_SUBNET are SUCCESS even though a traceroute
+# reports accepted==0 for them — which is exactly why soundness is judged from
+# differential_reachability's disposition sets, NOT from traceroute counts.
+_SUCCESS_DISPOS = {"ACCEPTED", "EXITS_NETWORK", "DELIVERED_TO_SUBNET"}
+
+
+def _broke_flows(diff_result: dict) -> list[dict]:
+    """Flows the change broke, read from differential_reachability's engine-
+    authoritative before/after disposition sets. A flow broke iff it had a
+    SUCCESS disposition before and has none after. This is vantage-independent
+    (the engine computes it over the whole flow space) — no single-source
+    artifact, and it does NOT use traceroute accepted-counts."""
+    out: list[dict] = []
+    for f in (diff_result.get("changed_flows") or []):
+        before = {d for d in str(f.get("before", "")).split("/") if d}
+        after = {d for d in str(f.get("after", "")).split("/") if d}
+        was_ok = bool(before & _SUCCESS_DISPOS)
+        now_broken = bool(after) and not (after & _SUCCESS_DISPOS)
+        if was_ok and now_broken:
+            out.append(f)
+    return out
+
+
+def _deterministic_verify(tool_log: list[dict], user_text: str = "") -> dict:
+    """Layer-2 completeness/soundness review of a CHANGE investigation — a code
+    checklist over the evidence. No LLM round-trip, no churn, fully predictable.
+    Returns the shape the synthesizer consumes:
     {complete, missing_probes, concerns, recommended_floor}.
 
-    Bar: a specific-flow reachability probe exists, a before/after comparison
-    exists, and a loop check exists. Plus the one genuinely valuable soundness
-    rule — a NEGATIVE reachability result seen from only ONE source must be
-    corroborated from a second/interior device, else the verdict floors at
-    INSUFFICIENT-DATA (guards the documented 'judge only from the failed device'
-    bug). Also floors on a blast-radius-vs-path-trace conflict."""
+    COVERAGE bar: a specific-flow reachability probe, a before/after comparison,
+    and a loop check all exist.
+
+    SOUNDNESS: grounded in differential_reachability's before/after disposition
+    sets (the engine's own full-flow-space diff — vantage-independent), NOT
+    traceroute accepted-counts (which read 0 for EXITS_NETWORK /
+    DELIVERED_TO_SUBNET even though those SUCCEED — the bug this replaces). The
+    one hard floor here is a genuine evidence CONFLICT: blast-radius says
+    NO_IMPACT while the before/after diff shows flows that went reachable ->
+    unreachable."""
     ok = [e for e in tool_log if not e.get("is_error")]
     names = {e["tool"] for e in ok}
     missing: list[str] = []
     concerns: list[str] = []
     floor = None
 
+    # -- COVERAGE bar --------------------------------------------------------
     if not (names & _PROBE_TOOLS):
         missing.append("a path trace / traffic simulation for the specific flow "
                        "the user asked about")
@@ -1392,34 +1471,95 @@ def _deterministic_verify(tool_log: list[dict]) -> dict:
     if "detect_loops" not in names:
         missing.append("a forwarding-loop check on the changed network")
 
-    # multi-vantage on a NEGATIVE path trace (the vantage-point safeguard)
-    traces = [e for e in ok if e["tool"] == "network_traceroute"]
-
-    def _negative(e):
+    # -- SOUNDNESS from differential_reachability content --------------------
+    broke: list[dict] = []
+    for e in (e for e in ok if e["tool"] == "differential_reachability"):
         r = _loads_result(e.get("result"))
-        return (isinstance(r, dict) and (r.get("trace_count") or 0) > 0
-                and (r.get("accepted") or 0) == 0)
+        if isinstance(r, dict):
+            broke.extend(_broke_flows(r))
 
-    negatives = [e for e in traces if _negative(e)]
-    sources = {str((e.get("input") or {}).get("source_location")) for e in traces}
-    if negatives and len(sources) <= 1:
-        concerns.append("the only reachability FAILURE was seen from a single "
-                        "source (often the modified device) — a local outlier")
-        missing.append("a path trace for the same flow from a SECOND / interior "
-                       "device to corroborate the failure")
-        floor = "INSUFFICIENT-DATA"
-
-    # conflict: blast-radius says NO_IMPACT but a path trace shows a failure
+    # CONFLICT: blast-radius reports NO_IMPACT but the before/after diff shows
+    # real breakage. Contradictory evidence -> do not trust the optimistic side.
     def _no_impact(e):
         r = _loads_result(e.get("result"))
         return isinstance(r, dict) and "NO_IMPACT" in str(r.get("overall", "")).upper()
-    if negatives and any(_no_impact(e) for e in ok if e["tool"] == "batfish_failure_impact"):
-        concerns.append("blast-radius reports NO_IMPACT but a path trace shows a "
-                        "failure — the evidence conflicts")
+    if broke and any(_no_impact(e) for e in ok
+                     if e["tool"] == "batfish_failure_impact"):
+        concerns.append("blast-radius reports NO_IMPACT but the before/after "
+                        "comparison shows flows that went from reachable to "
+                        "unreachable — the evidence conflicts")
         floor = "INSUFFICIENT-DATA"
 
     return {"complete": not missing, "missing_probes": missing,
             "concerns": concerns, "recommended_floor": floor}
+
+
+# Verdict floors ordered from most permissive to most restrictive. Used to
+# combine the gate floor, the deterministic floor, and the advisory floor into
+# one "no better than" bound (always the most restrictive).
+_FLOOR_RANK = {None: 0, "GO": 0, "GO-WITH-CONDITIONS": 1,
+               "INSUFFICIENT-DATA": 2, "NO-GO": 3}
+
+
+def _strongest_floor(*floors) -> str | None:
+    """Return the most restrictive of the given floors (None = no floor)."""
+    best = max(floors, key=lambda f: _FLOOR_RANK.get(f, 0), default=None)
+    return best if _FLOOR_RANK.get(best, 0) > 0 else None
+
+
+def _extract_json(text: str):
+    """Parse the first JSON object out of a model reply that may be wrapped in
+    prose or a ```json fence (Commotion). Mirrors the provider's tool-reply
+    parser. Returns a dict/list or None."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-z]*\s*|\s*```$", "", t, flags=re.S).strip()
+    obj = _loads_result(t)
+    if obj is not None:
+        return obj
+    m = re.search(r"\{.*\}", t, re.S)
+    return _loads_result(m.group(0)) if m else None
+
+
+def _advisory_verify(provider, user_text: str, ledger: "Ledger",
+                     tool_log: list[dict], det_notes: dict, notify) -> dict:
+    """Layer-3 ADVISORY review by the LLM verifier. One shot. It never gathers
+    more evidence and never asserts a network fact; it can only surface a
+    soundness concern and, at most, RECOMMEND a more conservative floor
+    (GO-WITH-CONDITIONS or INSUFFICIENT-DATA). Tighten-only by construction: the
+    recommended_floor is clamped so a wrong/hallucinating verifier can only make
+    the verdict MORE cautious, never clear it. On ANY error it fails LOUD
+    (available=False, surfaced as a residual-unknown), never a silent pass."""
+    payload = {
+        "user_question": user_text,
+        "session_state": ledger.to_public_dict(),
+        # hand it the deterministic result so it does not re-ask covered checks
+        "deterministic_review": det_notes,
+        "checks_run": tool_log,
+    }
+    try:
+        notify("Independent AI review")
+        resp = provider.chat(
+            [{"role": "user", "content": json.dumps(payload, default=str)}],
+            role="VERIFIER", format_hint=_VERIFIER_FORMAT)
+        data = _extract_json(resp.content)
+        if not isinstance(data, dict):
+            raise ValueError("verifier did not return a JSON object")
+        rec = data.get("recommended_floor")
+        # CLAMP: advisory may only tighten to conditions/insufficient.
+        if rec not in {"GO-WITH-CONDITIONS", "INSUFFICIENT-DATA"}:
+            rec = None
+        concerns = data.get("concerns") or []
+        if not isinstance(concerns, list):
+            concerns = [str(concerns)]
+        return {"available": True, "concerns": [str(c) for c in concerns],
+                "recommended_floor": rec}
+    except Exception as e:  # never let a verifier failure pass silently as GO
+        notify(f"Independent AI review unavailable ({type(e).__name__})")
+        return {"available": False, "concerns": [], "recommended_floor": None,
+                "error": type(e).__name__}
 
 
 _CHANGE_TOOLS = {"apply_failure_set", "stage_change_snapshot"}
@@ -1478,8 +1618,9 @@ def _is_false_context_refusal(text: str) -> bool:
 
 _TRANSLATOR_REASSERT = (
     "All required blocks ARE present in this conversation: the SESSION STATE, "
-    "DEVICE INVENTORY, and AVAILABLE CHECKS (the tool JSON schemas) were "
-    "provided above. You have everything needed — do NOT reply INSUFFICIENT-DATA "
+    "DEVICE INVENTORY, and AVAILABLE CHECKS (each tool's description and "
+    "arguments) were provided above. You have everything needed — do NOT reply "
+    "INSUFFICIENT-DATA "
     "about missing context. Select the single best check and reply with EXACTLY "
     "one JSON tool call: {\"tool\": ..., \"args\": { ... }}.")
 
@@ -1653,15 +1794,16 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
         except Exception as e:  # gates are a floor, never a turn-killer
             notify(f"Health gates could not run ({type(e).__name__})")
 
-    # ---- deterministic completeness/soundness review --------------------
-    # No LLM verifier: "is the evidence sufficient?" is a checklist over the
-    # tool_log (the old COMPLETENESS BAR, promoted to code — zero LLM round-trips,
-    # zero churn, fully predictable). Change turns only; a read-only query is
-    # answered by its single relevant check. If something is genuinely missing,
-    # nudge the translator ONCE (deterministically), then re-check.
+    # ---- Layer 2: deterministic completeness/soundness review -----------
+    # A checklist over the tool_log (coverage bar + a diff-grounded conflict
+    # floor) — zero LLM round-trips, zero churn, fully predictable. Change turns
+    # only; a read-only query is answered by its single relevant check. If
+    # coverage is genuinely missing, nudge the translator ONCE, then re-check.
+    # Layer 3 (the advisory LLM verifier) runs right after.
     verifier_notes = None
+    advisory = None
     if mode == "change":
-        verifier_notes = _deterministic_verify(tool_log)
+        verifier_notes = _deterministic_verify(tool_log, user_text)
         if verifier_notes["missing_probes"]:
             notify("Gathering additional evidence")
             missing_list = "\n".join(f"- {m}" for m in verifier_notes["missing_probes"])
@@ -1671,7 +1813,19 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
                 f"SYNTHESIS:\n{missing_list}"
                 + _CHECKS_RUN_HEADER + _checks_run_summary(tool_log))})
             _translator_rounds(provider, ops, ledger, messages, tool_log, notify)
-            verifier_notes = _deterministic_verify(tool_log)  # re-check once
+            verifier_notes = _deterministic_verify(tool_log, user_text)  # re-check
+
+        # ---- Layer 3: advisory LLM verifier (tighten-only, one shot) -------
+        # Runs AFTER the deterministic layers as an extra safety net for the
+        # semantic soundness a checklist can't judge (is the evidence relevant
+        # to THIS question? do the results quietly conflict?). It can only make
+        # the verdict more conservative — never clear it, never assert a break.
+        # Disable with NETGUARD_ADVISORY_VERIFY=0. Fail-closed (force
+        # INSUFFICIENT-DATA when the review can't run) with
+        # NETGUARD_VERIFY_FAIL_CLOSED=1.
+        if os.getenv("NETGUARD_ADVISORY_VERIFY", "1") != "0":
+            advisory = _advisory_verify(provider, user_text, ledger, tool_log,
+                                        verifier_notes, notify)
 
     engine_facts = json.dumps(tool_log, indent=1, default=str)
 
@@ -1680,11 +1834,44 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
     # change during remediation, so it is still authoritative here.
     notify("Synthesizing answer" if mode == "query" else "Synthesizing verdict")
 
+    # Combine every floor into one "no better than" bound (most restrictive
+    # wins). Gate floor can force NO-GO (engine fact); the two review layers can
+    # each raise at most INSUFFICIENT-DATA.
+    gate_rec = "NO-GO" if "GATE FLOOR" in gate_floor else None
+    det_rec = (verifier_notes or {}).get("recommended_floor")
+    adv_rec = (advisory or {}).get("recommended_floor")
+    combined = _strongest_floor(gate_rec, det_rec, adv_rec)
+
     floor = gate_floor
-    if verifier_notes and verifier_notes.get("recommended_floor"):
-        floor += ("\nVERIFIER FLOOR: an independent review recommends the verdict "
-                  f"be no better than {verifier_notes['recommended_floor']} — do "
-                  "not exceed it unless the results clearly refute the concern.\n")
+    if combined and combined != "NO-GO":  # NO-GO already stated by gate_floor
+        srcs = []
+        if det_rec == combined:
+            srcs.append("a deterministic completeness/soundness check")
+        if adv_rec == combined:
+            srcs.append("an independent AI review")
+        floor += ("\nVERIFIER FLOOR: " + " and ".join(srcs or ["review"]) +
+                  f" recommends the verdict be no better than {combined} — do not "
+                  "exceed it unless the results clearly refute the concern.\n")
+
+    # Fail-safe: if the advisory review could not run, surface it loudly so the
+    # verdict carries the caveat (optionally hard-floor via env).
+    if advisory is not None and not advisory.get("available"):
+        if os.getenv("NETGUARD_VERIFY_FAIL_CLOSED") == "1":
+            floor += ("\nVERIFIER FLOOR: the independent AI review could not run "
+                      f"({advisory.get('error')}); with fail-closed enabled the "
+                      "verdict is capped at INSUFFICIENT-DATA.\n")
+            combined = _strongest_floor(combined, "INSUFFICIENT-DATA")
+        else:
+            floor += ("\nREVIEW CAVEAT: the independent AI review could not run "
+                      f"({advisory.get('error')}) — note this as a residual "
+                      "unknown; the deterministic checks still hold.\n")
+
+    # Surface advisory concerns as facts for the synthesizer to weigh.
+    adv_concerns = (advisory or {}).get("concerns") or []
+    if adv_concerns:
+        floor += ("\nREVIEW CONCERNS (from the independent AI review, weigh "
+                  "against the results):\n" +
+                  "\n".join(f"- {c}" for c in adv_concerns) + "\n")
 
     mode_line = ("OUTPUT MODE: QUERY (read-only question — give a direct ANSWER, "
                  "not a Go/No-Go verdict)" if mode == "query"
@@ -1702,7 +1889,8 @@ def run_scenario_turn(ops: BatfishOps, ledger: Ledger, user_text: str,
 {final_text or '(none)'}
 
 ## VERIFIER NOTES
-{json.dumps(verifier_notes) if verifier_notes else '(none)'}
+deterministic: {json.dumps(verifier_notes) if verifier_notes else '(none)'}
+advisory: {json.dumps(advisory) if advisory else '(none)'}
 {floor}
 ## STRUCTURED CHECK RESULTS (the ONLY source of facts)
 {engine_facts}

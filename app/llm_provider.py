@@ -46,6 +46,44 @@ def _ollama_role_prompt(role: str | None) -> str | None:
     return p.read_text() if p.exists() else None
 
 
+def _arg_type(spec: dict) -> str:
+    """Compact human type for one JSON-schema property."""
+    t = spec.get("type", "any")
+    if t == "array":
+        it = (spec.get("items") or {}).get("type", "any")
+        return f"array of {it}"
+    if spec.get("enum"):
+        return "one of " + "|".join(str(e) for e in spec["enum"])
+    return t
+
+
+def _render_tool_catalog(tools: list[dict]) -> str:
+    """Render OpenAI-format tool schemas as a readable prose catalog for a model
+    with no native function-calling (Commotion). One block per tool: name,
+    description, then each argument on its own line with type, required flag, and
+    its own description. Easier to select from than raw JSON blobs, and generated
+    straight from the schemas so it can never drift from the executable contract."""
+    blocks: list[str] = []
+    for t in tools:
+        fn = t.get("function", t)
+        params = fn.get("parameters") or {}
+        props = params.get("properties") or {}
+        required = set(params.get("required") or [])
+        lines = [f"### {fn['name']}", fn.get("description", "").strip()]
+        if props:
+            lines.append("Arguments:")
+            for arg, spec in props.items():
+                spec = spec or {}
+                flag = ", required" if arg in required else ""
+                desc = str(spec.get("description", "")).strip()
+                tail = f" — {desc}" if desc else ""
+                lines.append(f"- {arg} ({_arg_type(spec)}{flag}){tail}")
+        else:
+            lines.append("Arguments: none.")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -159,12 +197,11 @@ class CommotionProvider:
             # false INSUFFICIENT-DATA refusal if a wrapper hides them.
             out = msg["content"]
             if tools:
-                schemas = "\n".join(
-                    json.dumps({"name": t["function"]["name"],
-                                "description": t["function"]["description"],
-                                "parameters": t["function"]["parameters"]})
-                    for t in tools)
-                out += "\n\n## AVAILABLE CHECKS (JSON schemas)\n" + schemas
+                out += ("\n\n## AVAILABLE CHECKS\n"
+                        "Call one by replying with a single JSON object "
+                        '{"tool": "<name>", "args": {...}} using the argument '
+                        "names shown. Only `required` args must be present.\n\n"
+                        + _render_tool_catalog(tools))
             return out
         if role == "user":
             return f"## USER QUESTION\n{msg['content']}"

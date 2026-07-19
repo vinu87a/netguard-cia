@@ -28,7 +28,7 @@ verified facts, the checks run, a rollback plan, and before/after topology
 diagrams; a read-only question returns a direct **ANSWER** with its evidence — no
 Go/No-Go, because nothing is being approved.
 
-Under the hood it drives ~37 deterministic Batfish analyses spanning reachability
+Under the hood it drives 35 deterministic Batfish analyses spanning reachability
 and path analysis, routing and BGP/OSPF, ACL/firewall and route-policy behavior,
 failure simulation and change diffing, engine health assertions, and network
 inventory (device properties, IP ownership, peer config).

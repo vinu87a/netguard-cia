@@ -2,7 +2,7 @@
 
 > Read this first. It orients you (an AI agent) to what this project is, how the
 > pieces fit, and where things live. Refreshed 2026-07 to match the current
-> build (Commotion/Ollama providers, two-mode output, 37 tools, Phase 1–5).
+> build (Commotion/Ollama providers, two-mode output, 35 tools, Phase 1–5).
 
 ## What we're building
 
@@ -42,7 +42,7 @@ Batfish MCP server (docker :3009)   +   direct pybatfish (:9996, app/engine_dire
 Batfish engine (docker) — the deterministic analysis core
 ```
 
-The translator drives a tool-use loop over **37 tools** (`TRANSLATOR_TOOLS` in
+The translator drives a tool-use loop over **35 tools** (`TRANSLATOR_TOOLS` in
 `orchestrator.py`). Most tools go **direct to the engine via pybatfish**
 (`engine_direct.py`) — that's where the depth is; a handful (traceroute, ACL
 analysis, snapshot lifecycle) go through the MCP server (`mcp_client.py`).
@@ -80,13 +80,29 @@ analysis, snapshot lifecycle) go through the MCP server (`mcp_client.py`).
    CHECKS-ALREADY-RUN recap rides each result.
 3. **Deterministic gate floor** (change turns) — `snapshot_gates` runs 6
    pybatfish assertions; only gates that **regress vs base** force NO-GO.
-4. **Deterministic completeness/soundness review** (`_deterministic_verify`,
-   change turns only) — a code checklist over the tool_log (specific-flow probe,
-   before/after, loop check, multi-vantage-on-a-negative, blast-radius conflict).
-   If something's missing → ONE remediation nudge → re-check. **No verifier LLM
-   call** (it was replaced 2026-07 — the old adversarial LLM verifier caused
-   churn and cost a round-trip per turn).
+4. **Verify — three layers, change turns only** (defense in depth for enterprise
+   verdicts; each layer can only TIGHTEN the verdict):
+   - **Layer 1 — gate floor** (step 3 above): engine health assertions that
+     regress vs base force NO-GO (the only layer that may assert a break).
+   - **Layer 2 — deterministic review** (`_deterministic_verify`): a code
+     checklist over tool_log (coverage: specific-flow probe, before/after, loop
+     check) + soundness grounded in `differential_reachability`'s before/after
+     disposition sets (NOT traceroute accepted-counts — those read 0 for
+     EXITS_NETWORK/DELIVERED_TO_SUBNET which SUCCEED; that bug was fixed 2026-07).
+     Hard floor = a blast-radius-vs-diff CONFLICT → INSUFFICIENT-DATA. Missing
+     coverage → ONE remediation nudge → re-check. No LLM call, no churn.
+   - **Layer 3 — advisory LLM verifier** (`_advisory_verify`, one shot): the
+     semantic soundness a checklist can't judge (relevance to THIS question,
+     quiet conflicts, proof for a global claim). **TIGHTEN-ONLY**: its
+     `recommended_floor` is CLAMPED to at most INSUFFICIENT-DATA (any GO/NO-GO is
+     dropped) — a wrong/hallucinating verifier can only over-caution, never clear
+     a verdict or invent a break. Never loops back to gather more. On error it
+     fails LOUD (a RESIDUAL-UNKNOWN, not a silent pass). Env:
+     `NETGUARD_ADVISORY_VERIFY=0` disables it; `NETGUARD_VERIFY_FAIL_CLOSED=1`
+     caps the verdict at INSUFFICIENT-DATA when the review can't run.
+   All floors combine via `_strongest_floor` (most restrictive wins).
 5. **Synthesizer** — two-zone output, mode-appropriate (VERDICT or ANSWER).
+   Weighs REVIEW CONCERNS against results; never restates a concern as a fact.
 
 ## Robustness layer (why the engine never crashes on bad LLM args)
 
@@ -99,11 +115,12 @@ analysis, snapshot lifecycle) go through the MCP server (`mcp_client.py`).
 - A broad `except` around tool execution catches anything else — a bad arg is
   always a recoverable ERROR result, never a dead turn or a wedged engine.
 
-## Tool inventory (37, by domain)
+## Tool inventory (35 translator-callable, by domain)
 
 - **Reachability/forwarding**: network_traceroute, batfish_simulate_traffic,
   network_bidirectional_reachability, reachability_search (proof engine),
-  differential_reachability, detect_loops, multipath_consistency.
+  differential_reachability, detect_loops, multipath_consistency,
+  batfish_failure_impact (coarse blast-radius, supplementary).
 - **Routing tables**: routes_to, bgp_rib, prefix_tracer, differential_query
   (generic base-vs-change diff of any table question).
 - **BGP**: bgp_session_status, bgp_compatibility, bgp_edges, bgp_peer_config.
@@ -126,7 +143,7 @@ Build history: Phase 1 (assertion gates + generic differential), Phase 2
 - `app/orchestrator.py` — the core: `TRANSLATOR_TOOLS`, `_execute_translator_tool`
   dispatch, `_translator_rounds`, gates, `_deterministic_verify`, `_scenario_mode`,
   synthesizer.
-- `app/engine_direct.py` — direct pybatfish questions (most of the 37 tools).
+- `app/engine_direct.py` — direct pybatfish questions (most of the 35 tools).
 - `app/mcp_client.py` — MCP client (traceroute, ACL analysis, snapshot mgmt).
 - `app/llm_provider.py` — `CommotionProvider`, `OpenAIProvider` (Ollama),
   `FallbackProvider`, `build_provider`.
