@@ -80,8 +80,12 @@ analysis, snapshot lifecycle) go through the MCP server (`mcp_client.py`).
    CHECKS-ALREADY-RUN recap rides each result.
 3. **Deterministic gate floor** (change turns) — `snapshot_gates` runs 6
    pybatfish assertions; only gates that **regress vs base** force NO-GO.
-4. **Bounded verify → remediate loop** — the verifier is an adversarial second
-   opinion; convergence + progress guards stop churn; **skipped for QUERY turns**.
+4. **Deterministic completeness/soundness review** (`_deterministic_verify`,
+   change turns only) — a code checklist over the tool_log (specific-flow probe,
+   before/after, loop check, multi-vantage-on-a-negative, blast-radius conflict).
+   If something's missing → ONE remediation nudge → re-check. **No verifier LLM
+   call** (it was replaced 2026-07 — the old adversarial LLM verifier caused
+   churn and cost a round-trip per turn).
 5. **Synthesizer** — two-zone output, mode-appropriate (VERDICT or ANSWER).
 
 ## Robustness layer (why the engine never crashes on bad LLM args)
@@ -120,7 +124,8 @@ Build history: Phase 1 (assertion gates + generic differential), Phase 2
 ## Where to find things
 
 - `app/orchestrator.py` — the core: `TRANSLATOR_TOOLS`, `_execute_translator_tool`
-  dispatch, `_translator_rounds`, gates, verify loop, `_scenario_mode`, synthesizer.
+  dispatch, `_translator_rounds`, gates, `_deterministic_verify`, `_scenario_mode`,
+  synthesizer.
 - `app/engine_direct.py` — direct pybatfish questions (most of the 37 tools).
 - `app/mcp_client.py` — MCP client (traceroute, ACL analysis, snapshot mgmt).
 - `app/llm_provider.py` — `CommotionProvider`, `OpenAIProvider` (Ollama),
